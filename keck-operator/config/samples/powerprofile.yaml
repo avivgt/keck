@@ -1,0 +1,23 @@
+# Use the "full" agent profile on GPU nodes for maximum accuracy.
+# GPU nodes have more power to attribute and benefit from hardware counters.
+apiVersion: keck.io/v1alpha1
+kind: PowerProfile
+metadata:
+  name: gpu-nodes-full
+spec:
+  profile: full
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  gpuEnabled: true
+
+---
+# Use "minimal" profile on edge/ARM nodes to reduce overhead.
+apiVersion: keck.io/v1alpha1
+kind: PowerProfile
+metadata:
+  name: edge-nodes-minimal
+spec:
+  profile: minimal
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  drainIntervalMs: 1000

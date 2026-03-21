@@ -1,0 +1,44 @@
+# Deploy Keck to the cluster with default settings.
+# Apply this after installing the operator.
+apiVersion: keck.io/v1alpha1
+kind: KeckCluster
+metadata:
+  name: keck
+spec:
+  agent:
+    # Agent profile: minimal, standard, full
+    defaultProfile: standard
+
+    # Tolerate control-plane nodes (meter everything)
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+    # Enable GPU monitoring if you have NVIDIA GPUs
+    gpuEnabled: false
+
+    # Uncomment to restrict to specific nodes
+    # nodeSelector:
+    #   kubernetes.io/os: linux
+
+  controller:
+    replicas: 1
+
+    # Enable power-aware scheduler
+    schedulerEnabled: false
+
+    # Carbon intensity tracking (optional)
+    # carbonAPIEndpoint: "https://api.electricitymap.org/v3"
+    # carbonRegion: "US-CAL-CISO"
+
+    # Energy cost for your region
+    energyCostPerKWh: "0.10"
+
+  # Fleet manager endpoint (optional — for multi-cluster setups)
+  # fleetEndpoint: "fleet-manager.example.com:9091"
+
+  image:
+    repository: ghcr.io/avivgt/keck
+    tag: latest
+    pullPolicy: IfNotPresent

@@ -1,0 +1,19 @@
+# Set a power budget for the ml-training namespace.
+# When exceeded, the scheduler rejects new pods.
+apiVersion: keck.io/v1alpha1
+kind: PowerBudget
+metadata:
+  name: ml-training-budget
+  namespace: ml-training
+spec:
+  # Maximum power allowed for this namespace (in watts)
+  maxWatts: 10000
+
+  # What to do when budget is exceeded:
+  #   alert    — log warning and send webhook (default)
+  #   throttle — deprioritize new pods in scheduler scoring
+  #   reject   — block new pods from scheduling
+  action: alert
+
+  # Webhook for alerts (optional)
+  # alertWebhook: "https://hooks.slack.com/services/T.../B.../..."
