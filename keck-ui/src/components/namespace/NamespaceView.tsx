@@ -3,7 +3,7 @@
 // Pod-level power for a specific namespace. Drill-down from ClusterOverview.
 
 import * as React from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useHistory, Link } from "react-router-dom";
 import {
   Page,
   PageSection,
@@ -29,7 +29,7 @@ const NamespaceView: React.FC = () => {
   const { ns } = useParams<{ ns: string }>();
   const [pods, setPods] = React.useState<PodPower[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const navigate = useNavigate();
+  const history = useHistory();
 
   React.useEffect(() => {
     if (!ns) return;
@@ -88,7 +88,7 @@ const NamespaceView: React.FC = () => {
                 <Tr
                   key={pod.pod_uid}
                   isClickable
-                  onRowClick={() => navigate(`/power-management/pods/${pod.pod_uid}`)}
+                  onRowClick={() => history.push(`/power-management/pods/${pod.pod_uid}`)}
                 >
                   <Td>{pod.pod_name}</Td>
                   <Td>{pod.node_name}</Td>

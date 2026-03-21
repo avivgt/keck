@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::{Component, PowerReading, PowerSource, SourceId};
-use crate::attribution::engine::EnergyInput;
 
 /// Configuration for the hardware collector.
 pub struct CollectorConfig {

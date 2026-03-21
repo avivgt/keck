@@ -113,8 +113,9 @@ impl PowerSource for RaplSource {
 ///
 /// Scans /sys/class/powercap/intel-rapl:N for each socket.
 /// Returns one source per socket's package domain.
-pub fn discover() -> Result<Vec<RaplSource>, SourceError> {
-    let powercap = Path::new("/sys/class/powercap");
+pub fn discover(sysfs_root: &str) -> Result<Vec<RaplSource>, SourceError> {
+    let powercap_path = format!("{}/class/powercap", sysfs_root);
+    let powercap = Path::new(&powercap_path);
     if !powercap.exists() {
         return Err(SourceError::Unavailable(
             "/sys/class/powercap not found (no RAPL support)".into(),
@@ -175,8 +176,9 @@ pub fn discover() -> Result<Vec<RaplSource>, SourceError> {
 ///
 /// DRAM is typically intel-rapl:N:2 (sub-domain of each package).
 /// Not available on all CPUs.
-pub fn discover_dram() -> Result<Vec<RaplSource>, SourceError> {
-    let powercap = Path::new("/sys/class/powercap");
+pub fn discover_dram(sysfs_root: &str) -> Result<Vec<RaplSource>, SourceError> {
+    let powercap_path = format!("{}/class/powercap", sysfs_root);
+    let powercap = Path::new(&powercap_path);
     if !powercap.exists() {
         return Err(SourceError::Unavailable("no powercap".into()));
     }

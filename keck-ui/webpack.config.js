@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import path from "path";
-import { ConsoleRemotePlugin } from "@openshift-console/dynamic-plugin-sdk-webpack";
+const path = require("path");
+const { ConsoleRemotePlugin } = require("@openshift-console/dynamic-plugin-sdk-webpack");
 
-const config = {
+module.exports = {
   entry: {},
   module: {
     rules: [
@@ -33,5 +33,3 @@ const config = {
     },
   },
 };
-
-export default config;

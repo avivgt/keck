@@ -113,8 +113,9 @@ impl PowerSource for HwmonSource {
 /// - energy{N}_input files (energy counter)
 ///
 /// Classifies component type from the chip name and label.
-pub fn discover() -> Result<Vec<HwmonSource>, SourceError> {
-    let hwmon_base = Path::new("/sys/class/hwmon");
+pub fn discover(sysfs_root: &str) -> Result<Vec<HwmonSource>, SourceError> {
+    let hwmon_path = format!("{}/class/hwmon", sysfs_root);
+    let hwmon_base = Path::new(&hwmon_path);
     if !hwmon_base.exists() {
         return Err(SourceError::Unavailable("no /sys/class/hwmon".into()));
     }

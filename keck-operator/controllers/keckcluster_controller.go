@@ -226,16 +226,27 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 							Image:           image,
 							ImagePullPolicy: keck.Spec.Image.PullPolicy,
 							Command:         []string{"/usr/bin/keck-agent"},
-							Args: []string{
-								fmt.Sprintf("--profile=%s", keck.Spec.Agent.DefaultProfile),
+							Env: []corev1.EnvVar{
+								{
+									Name: "NODE_NAME",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "spec.nodeName",
+										},
+									},
+								},
+								{
+									Name:  "KECK_CONTROLLER_URL",
+									Value: "http://keck-controller.keck-system.svc:8080",
+								},
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
 							},
 							Resources: agentResources(keck),
 							VolumeMounts: []corev1.VolumeMount{
-								{Name: "proc", MountPath: "/proc", ReadOnly: true},
-								{Name: "sys", MountPath: "/sys", ReadOnly: true},
+								{Name: "proc", MountPath: "/host/proc", ReadOnly: true},
+								{Name: "sys", MountPath: "/host/sys", ReadOnly: true},
 							},
 							Ports: []corev1.ContainerPort{
 								{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP},

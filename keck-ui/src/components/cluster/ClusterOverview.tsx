@@ -4,7 +4,7 @@
 // Click a namespace to drill down to pods.
 
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
+import { useHistory } from "react-router-dom";
 import {
   Page,
   PageSection,
@@ -27,7 +27,7 @@ import { formatWatts } from "../../utils/format";
 const ClusterOverview: React.FC = () => {
   const [namespaces, setNamespaces] = React.useState<NamespacePower[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const navigate = useNavigate();
+  const history = useHistory();
 
   React.useEffect(() => {
     const fetchData = () => {
@@ -76,7 +76,7 @@ const ClusterOverview: React.FC = () => {
                 <Tr
                   key={ns.namespace}
                   isClickable
-                  onRowClick={() => navigate(`/power-management/namespaces/${ns.namespace}`)}
+                  onRowClick={() => history.push(`/power-management/namespaces/${ns.namespace}`)}
                 >
                   <Td>{ns.namespace}</Td>
                   <Td>{formatWatts(ns.total_watts)}</Td>

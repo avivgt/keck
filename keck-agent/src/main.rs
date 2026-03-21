@@ -1,214 +1,322 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Power metering agent — full pipeline.
+//! Keck node agent — reads real hardware power data and reports to the controller.
 //!
-//! Layer 0: Hardware energy sources (RAPL, hwmon, GPU, Redfish)
-//! Layer 1: eBPF kernel observation (sched_switch, cpu_frequency, perf)
-//! Layer 2: Attribution engine + K8s enrichment + store + outputs
-//!
-//! Main loop:
-//!   1. Tick hardware collector — reads sources on their tier schedule (Layer 0)
-//!   2. Drain eBPF maps (Layer 1)
-//!   3. Build energy input from hardware deltas (Layer 0 → Layer 2)
-//!   4. Attribute energy to processes (Layer 2 engine)
-//!   5. Enrich with K8s metadata (Layer 2 k8s)
-//!   6. Store snapshot locally (Layer 2 store)
-//!   7. Update Prometheus metrics (Layer 2 output)
-//!   8. Send pod summaries upstream (Layer 2 output)
+//! Pipeline:
+//! 1. Discover hardware sources (RAPL, hwmon)
+//! 2. Read energy counters every interval
+//! 3. Compute deltas (energy consumed since last read)
+//! 4. Enumerate running pods via /proc cgroup mapping
+//! 5. POST report to keck-controller
 
-mod attribution;
-mod ebpf;
 mod hardware;
-mod k8s;
-mod output;
-mod store;
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::fs;
+use std::time::{Duration, SystemTime};
 
-use attribution::engine::AttributionEngine;
-use ebpf::{EbpfObserver, ObserverConfig};
-use hardware::{CollectorConfig, HardwareCollector};
-use k8s::CgroupResolver;
-use log::{error, info, warn};
-use output::PrometheusExporter;
-use store::{LocalStore, StoreProfile};
+use log::{info, warn};
+use serde::Serialize;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+use hardware::{Component, PowerSource, discover_sources, procfs_root};
 
-    // --- Configuration ---
-    let drain_interval = Duration::from_millis(500);
-    let cgroup_refresh_interval = Duration::from_secs(15);
+/// Report sent to the controller.
+#[derive(Serialize)]
+struct AgentReport {
+    node: NodePowerReport,
+    pods: Vec<PodPowerReport>,
+}
 
-    // --- Layer 0: Hardware Sources ---
-    info!("Discovering hardware power sources...");
-    let sources = hardware::discover_sources();
+#[derive(Serialize)]
+struct NodePowerReport {
+    node_name: String,
+    cpu_uw: u64,
+    memory_uw: u64,
+    gpu_uw: u64,
+    platform_uw: Option<u64>,
+    idle_uw: u64,
+    error_ratio: f64,
+    pod_count: u32,
+    process_count: u32,
+    timestamp: SystemTime,
+}
+
+#[derive(Serialize)]
+struct PodPowerReport {
+    node_name: String,
+    pod_uid: String,
+    pod_name: String,
+    namespace: String,
+    cpu_uw: u64,
+    memory_uw: u64,
+    gpu_uw: u64,
+    total_uw: u64,
+    timestamp: SystemTime,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .init();
+
+    let node_name = get_node_name();
+    let controller_url = std::env::var("KECK_CONTROLLER_URL")
+        .unwrap_or_else(|_| "http://keck-controller.keck-system.svc:8080".into());
+    let interval = Duration::from_secs(
+        std::env::var("KECK_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10),
+    );
+
+    info!("Keck agent starting");
+    info!("  Node: {}", node_name);
+    info!("  Controller: {}", controller_url);
+    info!("  Interval: {:?}", interval);
+
+    // Discover hardware power sources
+    let sources = discover_sources();
+    info!("Discovered {} power source(s)", sources.len());
 
     if sources.is_empty() {
-        error!("No power sources discovered — cannot operate without energy data");
-        return Err("No power sources available".into());
+        warn!("No power sources found — agent will report zero power");
     }
 
-    let num_sockets = num_sockets();
-    let num_cores = num_cpus();
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
 
-    let hw_config = CollectorConfig {
-        fast_interval: Duration::from_millis(100),
-        medium_interval: Duration::from_millis(500),
-        slow_interval: Duration::from_secs(3),
-        heartbeat_interval: Duration::from_secs(5),
-    };
+    let report_url = format!("{}/api/v1/report", controller_url);
 
-    let mut hw_collector = HardwareCollector::new(sources, hw_config, num_sockets);
-    info!(
-        "Layer 0: Hardware collector initialized ({} sockets, {} cores)",
-        num_sockets, num_cores
-    );
+    // Previous readings for delta computation
+    let mut prev_readings: HashMap<String, u64> = HashMap::new();
 
-    // --- Layer 1: eBPF Observer ---
-    let ebpf_config = ObserverConfig {
-        drain_interval,
-        max_pid_entries: 65536,
-    };
+    // Initial read to populate prev_readings
+    for source in &sources {
+        if let Ok(reading) = source.read() {
+            if let Some(energy) = reading.energy_uj {
+                prev_readings.insert(source.id().0.clone(), energy);
+            }
+        }
+    }
 
-    let mut observer = EbpfObserver::load(ebpf_config)?;
-    info!("Layer 1: eBPF programs loaded and attached");
+    info!("Initial hardware read complete, entering collection loop");
 
-    // --- Layer 2: Attribution Engine ---
-    let mut engine = AttributionEngine::new(num_cores, num_sockets);
-    info!("Layer 2: Attribution engine initialized");
-
-    // --- Layer 2: K8s Enrichment ---
-    let mut cgroup_resolver = CgroupResolver::new();
-    let _ = cgroup_resolver.refresh();
-    let mut last_cgroup_refresh = std::time::Instant::now();
-
-    // --- Layer 2: Local Store ---
-    let mut store = LocalStore::new(StoreProfile::standard());
-
-    // --- Layer 2: Output ---
-    let prometheus = PrometheusExporter::new(false);
-    // TODO: Start HTTP server for /metrics on configurable port
-    // TODO: Start gRPC client for upstream reporting to cluster controller
-    // TODO: Start query server for drill-down requests
-
-    info!(
-        "Agent running — drain interval: {:?}, heartbeat: {:?}",
-        drain_interval,
-        Duration::from_secs(5),
-    );
-
-    // --- Main Collection Loop ---
-    //
-    // The loop runs at the drain_interval (500ms by default).
-    // On each iteration:
-    //   - Hardware collector ticks (reads sources on their tier schedule)
-    //   - eBPF maps are drained
-    //   - Attribution engine combines both into per-process power
-    //
-    // The hardware collector internally manages fast/medium/slow tiers
-    // and runs reconciliation on heartbeat.
     loop {
-        std::thread::sleep(drain_interval);
+        tokio::time::sleep(interval).await;
 
-        // Step 1: Tick hardware collector (Layer 0)
-        // This reads whichever sources are due based on their tier.
-        // On heartbeat intervals, ALL sources are read and reconciled.
-        hw_collector.tick();
+        // Read all sources and compute deltas
+        let mut cpu_energy_uj: u64 = 0;
+        let mut mem_energy_uj: u64 = 0;
+        let mut gpu_energy_uj: u64 = 0;
+        let mut platform_energy_uj: Option<u64> = None;
 
-        // Step 2: Drain eBPF maps (Layer 1)
-        let observation = match observer.drain() {
-            Ok(obs) => obs,
-            Err(e) => {
-                error!("Failed to drain eBPF maps: {}", e);
-                continue;
-            }
-        };
+        for source in &sources {
+            let reading = match source.read() {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!("Failed to read {}: {}", source.name(), e);
+                    continue;
+                }
+            };
 
-        // Step 3: Build energy input from hardware deltas (Layer 0 → Layer 2)
-        let energy = hw_collector.energy_input(drain_interval.as_nanos() as u64);
+            // Compute energy delta
+            let delta = if let Some(current_energy) = reading.energy_uj {
+                let prev = prev_readings
+                    .get(&source.id().0)
+                    .copied()
+                    .unwrap_or(current_energy);
 
-        // Step 4: Attribution (Layer 2 engine)
-        let mut snapshot = engine.attribute(&observation, &energy);
+                let delta = if current_energy >= prev {
+                    current_energy - prev
+                } else if reading.max_energy_uj > 0 {
+                    (reading.max_energy_uj - prev) + current_energy
+                } else {
+                    current_energy
+                };
 
-        // Step 5: K8s enrichment
-        if last_cgroup_refresh.elapsed() >= cgroup_refresh_interval {
-            if let Err(e) = cgroup_resolver.refresh() {
-                warn!("Failed to refresh cgroup map: {}", e);
-            }
-            last_cgroup_refresh = std::time::Instant::now();
-        }
-        k8s::enrich(&mut snapshot, &cgroup_resolver);
+                prev_readings.insert(source.id().0.clone(), current_energy);
+                delta
+            } else if let Some(power_uw) = reading.power_uw {
+                // Convert instantaneous power to energy over interval
+                (power_uw as u128 * interval.as_nanos() / 1_000_000_000) as u64
+            } else {
+                0
+            };
 
-        // Step 6: Store locally
-        store.push(snapshot.clone());
-
-        // Step 7: Update Prometheus metrics
-        prometheus.update(&snapshot);
-
-        // Step 8: Send pod summaries upstream
-        let outbox = store.drain_outbox();
-        if !outbox.is_empty() {
-            // TODO: Send via gRPC to cluster controller
-            // On failure: store.requeue(outbox);
-        }
-
-        // Log reconciliation on heartbeats
-        if let Some(recon) = hw_collector.last_reconciliation() {
-            if recon.error_ratio > 0.15 {
-                warn!(
-                    "High reconciliation error: {:.1}% unaccounted",
-                    recon.error_ratio * 100.0
-                );
+            // Accumulate by component
+            match source.component() {
+                Component::Cpu => cpu_energy_uj += delta,
+                Component::Memory => mem_energy_uj += delta,
+                Component::Gpu => gpu_energy_uj += delta,
+                Component::Platform => platform_energy_uj = Some(delta),
+                _ => {}
             }
         }
 
-        // Self-monitoring
-        let mem = store.estimated_memory();
-        if mem > 100 * 1024 * 1024 {
-            warn!("Store memory usage high: {}MB", mem / (1024 * 1024));
-        }
-    }
-}
+        // Convert energy (microjoules over interval) to power (microwatts)
+        let interval_ns = interval.as_nanos() as u64;
+        let cpu_uw = energy_to_power(cpu_energy_uj, interval_ns);
+        let mem_uw = energy_to_power(mem_energy_uj, interval_ns);
+        let gpu_uw = energy_to_power(gpu_energy_uj, interval_ns);
+        let platform_uw = platform_energy_uj.map(|e| energy_to_power(e, interval_ns));
 
-fn num_cpus() -> u32 {
-    std::fs::read_to_string("/sys/devices/system/cpu/online")
-        .ok()
-        .and_then(|s| parse_cpu_range(&s))
-        .unwrap_or(1)
-}
+        // Idle estimation
+        let total = cpu_uw + mem_uw + gpu_uw;
+        let idle_uw = platform_uw.map(|p| p.saturating_sub(total)).unwrap_or(0);
 
-fn num_sockets() -> u32 {
-    let mut packages = std::collections::HashSet::new();
-    for cpu in 0..1024u32 {
-        let path = format!(
-            "/sys/devices/system/cpu/cpu{}/topology/physical_package_id",
-            cpu
-        );
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(id) = content.trim().parse::<u32>() {
-                packages.insert(id);
+        // Error ratio
+        let error_ratio = if let Some(p) = platform_uw {
+            if p > 0 {
+                (p as i64 - total as i64).unsigned_abs() as f64 / p as f64
+            } else {
+                0.0
             }
         } else {
-            break;
+            0.0
+        };
+
+        // Enumerate pods from /proc cgroups
+        let pods = enumerate_pods(&node_name, cpu_uw);
+        let pod_count = pods.len() as u32;
+
+        let report = AgentReport {
+            node: NodePowerReport {
+                node_name: node_name.clone(),
+                cpu_uw,
+                memory_uw: mem_uw,
+                gpu_uw,
+                platform_uw,
+                idle_uw,
+                error_ratio,
+                pod_count,
+                process_count: count_processes(),
+                timestamp: SystemTime::now(),
+            },
+            pods,
+        };
+
+        // POST to controller
+        match http_client.post(&report_url).json(&report).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!(
+                    "Reported: cpu={:.1}W mem={:.1}W gpu={:.1}W platform={} pods={}",
+                    cpu_uw as f64 / 1e6,
+                    mem_uw as f64 / 1e6,
+                    gpu_uw as f64 / 1e6,
+                    platform_uw
+                        .map(|p| format!("{:.1}W", p as f64 / 1e6))
+                        .unwrap_or("N/A".into()),
+                    pod_count,
+                );
+            }
+            Ok(resp) => warn!("Controller returned {}", resp.status()),
+            Err(e) => warn!("Failed to report to controller: {}", e),
         }
     }
-    packages.len().max(1) as u32
 }
 
-fn parse_cpu_range(s: &str) -> Option<u32> {
-    let mut count = 0u32;
-    for range in s.trim().split(',') {
-        let parts: Vec<&str> = range.split('-').collect();
-        match parts.len() {
-            1 => count += 1,
-            2 => {
-                let start: u32 = parts[0].parse().ok()?;
-                let end: u32 = parts[1].parse().ok()?;
-                count += end - start + 1;
-            }
-            _ => return None,
+fn energy_to_power(energy_uj: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 { return 0; }
+    ((energy_uj as u128 * 1_000_000_000) / interval_ns as u128) as u64
+}
+
+fn get_node_name() -> String {
+    std::env::var("NODE_NAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .or_else(|_| fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn count_processes() -> u32 {
+    fs::read_dir(procfs_root())
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|s| s.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false)
+                })
+                .count() as u32
+        })
+        .unwrap_or(0)
+}
+
+/// Enumerate pods by scanning /proc cgroups.
+fn enumerate_pods(node_name: &str, total_cpu_uw: u64) -> Vec<PodPowerReport> {
+    let mut pod_process_count: HashMap<String, u32> = HashMap::new();
+
+    let proc_entries = match fs::read_dir(procfs_root()) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in proc_entries.filter_map(|e| e.ok()) {
+        let pid_str = entry.file_name().to_string_lossy().to_string();
+        if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        let cgroup_path = format!("{}/{}/cgroup", procfs_root(), pid_str);
+        let cgroup_content = match fs::read_to_string(&cgroup_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if let Some(pod_uid) = extract_pod_uid(&cgroup_content) {
+            *pod_process_count.entry(pod_uid).or_default() += 1;
         }
     }
-    Some(count)
+
+    if pod_process_count.is_empty() {
+        return Vec::new();
+    }
+
+    let total_processes: u32 = pod_process_count.values().sum();
+
+    pod_process_count
+        .iter()
+        .map(|(pod_uid, count)| {
+            let ratio = if total_processes > 0 {
+                *count as f64 / total_processes as f64
+            } else {
+                0.0
+            };
+            let pod_cpu_uw = (total_cpu_uw as f64 * ratio) as u64;
+
+            PodPowerReport {
+                node_name: node_name.to_string(),
+                pod_uid: pod_uid.clone(),
+                pod_name: pod_uid.clone(),
+                namespace: "default".into(),
+                cpu_uw: pod_cpu_uw,
+                memory_uw: 0,
+                gpu_uw: 0,
+                total_uw: pod_cpu_uw,
+                timestamp: SystemTime::now(),
+            }
+        })
+        .collect()
+}
+
+/// Extract pod UID from cgroup content.
+fn extract_pod_uid(cgroup_content: &str) -> Option<String> {
+    for line in cgroup_content.lines() {
+        let path = line.rsplit(':').next().unwrap_or("");
+        if let Some(pod_pos) = path.find("pod") {
+            let after_pod = &path[pod_pos + 3..];
+            let uid: String = after_pod
+                .chars()
+                .take_while(|c| *c != '/' && *c != '.')
+                .collect();
+            if uid.len() >= 8 {
+                return Some(uid.replace('_', "-"));
+            }
+        }
+    }
+    None
 }
