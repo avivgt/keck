@@ -1,0 +1,288 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  name: keck-operator.v0.1.0
+  namespace: placeholder
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "keck.io/v1alpha1",
+          "kind": "KeckCluster",
+          "metadata": {"name": "keck"},
+          "spec": {
+            "agent": {"defaultProfile": "standard"},
+            "controller": {"replicas": 1}
+          }
+        },
+        {
+          "apiVersion": "keck.io/v1alpha1",
+          "kind": "PowerBudget",
+          "metadata": {"name": "example-budget", "namespace": "default"},
+          "spec": {"maxWatts": 5000, "action": "alert"}
+        },
+        {
+          "apiVersion": "keck.io/v1alpha1",
+          "kind": "PowerProfile",
+          "metadata": {"name": "gpu-full"},
+          "spec": {"profile": "full", "nodeSelector": {"nvidia.com/gpu.present": "true"}}
+        }
+      ]
+    capabilities: Full Lifecycle
+    categories: Monitoring
+    containerImage: ghcr.io/avivgt/keck-operator:0.1.0
+    createdAt: "2026-03-21T00:00:00Z"
+    description: Accurate per-workload power metering for Kubernetes and OpenShift.
+    operators.operatorframework.io/builder: operator-sdk-v1.38.0
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+    repository: https://github.com/avivgt/keck
+    support: Keck Project
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+      - name: keckclusters.keck.io
+        displayName: Keck Cluster
+        description: Deploys Keck power metering to a Kubernetes cluster. Creates agent DaemonSet and controller Deployment.
+        kind: KeckCluster
+        version: v1alpha1
+        resources:
+          - kind: DaemonSet
+            name: keck-agent
+            version: v1
+          - kind: Deployment
+            name: keck-controller
+            version: v1
+          - kind: Service
+            name: keck-controller
+            version: v1
+          - kind: ServiceAccount
+            name: keck-agent
+            version: v1
+        specDescriptors:
+          - path: agent.defaultProfile
+            displayName: Agent Profile
+            description: Power metering profile (minimal, standard, full)
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:select:minimal
+              - urn:alm:descriptor:com.tectonic.ui:select:standard
+              - urn:alm:descriptor:com.tectonic.ui:select:full
+          - path: agent.gpuEnabled
+            displayName: GPU Monitoring
+            description: Enable NVIDIA GPU power monitoring
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:booleanSwitch
+          - path: controller.replicas
+            displayName: Controller Replicas
+            description: Number of controller replicas
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:podCount
+          - path: controller.schedulerEnabled
+            displayName: Power-Aware Scheduler
+            description: Enable the power-aware Kubernetes scheduler extender
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:booleanSwitch
+          - path: controller.carbonRegion
+            displayName: Carbon Region
+            description: Grid region for carbon intensity tracking
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:text
+          - path: image.repository
+            displayName: Image Repository
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:text
+          - path: image.tag
+            displayName: Image Tag
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:text
+        statusDescriptors:
+          - path: phase
+            displayName: Phase
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:text
+          - path: agentReady
+            displayName: Agents Ready
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:podCount
+          - path: controllerReady
+            displayName: Controller Ready
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:booleanSwitch
+
+      - name: powerbudgets.keck.io
+        displayName: Power Budget
+        description: Sets a power consumption limit (in watts) for a namespace.
+        kind: PowerBudget
+        version: v1alpha1
+        specDescriptors:
+          - path: maxWatts
+            displayName: Maximum Watts
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:number
+          - path: action
+            displayName: Enforcement Action
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:select:alert
+              - urn:alm:descriptor:com.tectonic.ui:select:throttle
+              - urn:alm:descriptor:com.tectonic.ui:select:reject
+        statusDescriptors:
+          - path: currentWatts
+            displayName: Current Power (W)
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:number
+          - path: exceeded
+            displayName: Budget Exceeded
+            x-descriptors:
+              - urn:alm:descriptor:com.tectonic.ui:booleanSwitch
+
+      - name: powerprofiles.keck.io
+        displayName: Power Profile
+        description: Overrides agent metering profile for nodes matching a label selector.
+        kind: PowerProfile
+        version: v1alpha1
+
+  description: |
+    ## Keck — Accurate Per-Workload Power Metering
+
+    Keck measures energy consumption at every level of your Kubernetes
+    infrastructure — from individual CPU cores to fleet-wide carbon reports —
+    with hardware-grounded accuracy and transparent error bounds.
+
+    ### Features
+
+    - **Bottom-up attribution**: Per-core energy weighted by frequency and
+      hardware counters, not just CPU time ratios
+    - **eBPF-powered**: In-kernel scheduler tracing for nanosecond-precision
+      per-process, per-core tracking
+    - **Hardware reconciliation**: Validates component measurements against
+      PSU ground truth with published error bounds
+    - **Power budgets**: Set per-namespace power limits with alert, throttle,
+      or reject enforcement
+    - **Carbon tracking**: Grid carbon intensity integration for emissions
+      reporting and carbon-aware scheduling
+    - **Power-aware scheduler**: Place pods based on node power headroom
+      and carbon intensity
+    - **Zoom model**: Drill down from fleet → cluster → namespace → pod →
+      process → per-core detail
+
+    ### Quick Start
+
+    1. Install this operator from OperatorHub
+    2. Create a `KeckCluster` resource:
+       ```yaml
+       apiVersion: keck.io/v1alpha1
+       kind: KeckCluster
+       metadata:
+         name: keck
+       spec:
+         agent:
+           defaultProfile: standard
+         controller:
+           replicas: 1
+       ```
+    3. View power metrics in the Keck dashboard or Prometheus/Grafana
+
+    ### Prerequisites
+
+    - Kubernetes 1.28+ or OpenShift 4.14+
+    - Linux nodes with RAPL support (Intel Sandy Bridge+ or AMD Zen+)
+    - Privileged containers allowed (required for eBPF and /sys access)
+
+  displayName: Keck Operator
+  icon:
+    - base64data: ""
+      mediatype: image/png
+  install:
+    strategy: deployment
+    spec:
+      clusterPermissions:
+        - serviceAccountName: keck-operator
+          rules:
+            - apiGroups: ["keck.io"]
+              resources: ["*"]
+              verbs: ["*"]
+            - apiGroups: [""]
+              resources: ["namespaces", "serviceaccounts", "services", "configmaps"]
+              verbs: ["*"]
+            - apiGroups: ["apps"]
+              resources: ["daemonsets", "deployments"]
+              verbs: ["*"]
+            - apiGroups: ["rbac.authorization.k8s.io"]
+              resources: ["clusterroles", "clusterrolebindings"]
+              verbs: ["*"]
+      deployments:
+        - name: keck-operator
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                control-plane: keck-operator
+            template:
+              metadata:
+                labels:
+                  control-plane: keck-operator
+              spec:
+                serviceAccountName: keck-operator
+                securityContext:
+                  runAsNonRoot: true
+                containers:
+                  - name: manager
+                    image: ghcr.io/avivgt/keck-operator:0.1.0
+                    command: ["/manager"]
+                    args:
+                      - --leader-elect
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        drop: [ALL]
+                    livenessProbe:
+                      httpGet:
+                        path: /healthz
+                        port: 8081
+                      initialDelaySeconds: 15
+                      periodSeconds: 20
+                    readinessProbe:
+                      httpGet:
+                        path: /readyz
+                        port: 8081
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 64Mi
+                      limits:
+                        cpu: 100m
+                        memory: 128Mi
+  installModes:
+    - type: OwnNamespace
+      supported: true
+    - type: SingleNamespace
+      supported: true
+    - type: MultiNamespace
+      supported: false
+    - type: AllNamespaces
+      supported: true
+  maturity: alpha
+  provider:
+    name: Keck Project
+    url: https://github.com/avivgt/keck
+  version: 0.1.0
+  minKubeVersion: "1.28.0"
+  keywords:
+    - power
+    - energy
+    - carbon
+    - sustainability
+    - monitoring
+    - observability
+    - green
+    - ebpf
+  maintainers:
+    - name: Aviv GT
+      email: ""
+  links:
+    - name: GitHub
+      url: https://github.com/avivgt/keck
+    - name: Documentation
+      url: https://github.com/avivgt/keck/blob/main/README.md

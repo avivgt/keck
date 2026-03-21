@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keck-system
+  labels:
+    control-plane: keck-operator
+    app.kubernetes.io/managed-by: keck-operator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keck-operator
+  namespace: keck-system
+  labels:
+    control-plane: keck-operator
+    app.kubernetes.io/name: keck-operator
+    app.kubernetes.io/managed-by: keck-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: keck-operator
+  template:
+    metadata:
+      labels:
+        control-plane: keck-operator
+    spec:
+      serviceAccountName: keck-operator
+      securityContext:
+        runAsNonRoot: true
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          image: ghcr.io/avivgt/keck-operator:latest
+          command: ["/manager"]
+          args:
+            - --leader-elect
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi

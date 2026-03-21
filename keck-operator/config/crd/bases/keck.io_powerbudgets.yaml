@@ -1,0 +1,80 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: powerbudgets.keck.io
+  labels:
+    app.kubernetes.io/managed-by: keck-operator
+    app.kubernetes.io/part-of: keck
+spec:
+  group: keck.io
+  names:
+    kind: PowerBudget
+    listKind: PowerBudgetList
+    plural: powerbudgets
+    singular: powerbudget
+    shortNames:
+      - pb
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Budget (W)
+          type: number
+          jsonPath: .spec.maxWatts
+        - name: Current (W)
+          type: number
+          jsonPath: .status.currentWatts
+        - name: Usage
+          type: string
+          jsonPath: .status.usagePercent
+        - name: Exceeded
+          type: boolean
+          jsonPath: .status.exceeded
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: PowerBudget sets a power consumption limit for a namespace.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [maxWatts]
+              properties:
+                maxWatts:
+                  type: number
+                  format: double
+                  minimum: 0
+                  description: Maximum power in watts for this namespace.
+                action:
+                  type: string
+                  enum: [alert, throttle, reject]
+                  default: alert
+                  description: Action when budget is exceeded.
+                alertWebhook:
+                  type: string
+                  description: Webhook URL for alert notifications.
+            status:
+              type: object
+              properties:
+                currentWatts:
+                  type: number
+                  format: double
+                usagePercent:
+                  type: string
+                exceeded:
+                  type: boolean
+                lastUpdated:
+                  type: string
+                  format: date-time
