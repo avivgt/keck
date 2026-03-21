@@ -1,0 +1,23 @@
+[package]
+name = "keck-ebpf"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+keck-common = { path = "../keck-common" }
+
+[[bin]]
+name = "keck-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 2        # eBPF verifier needs optimized code
+overflow-checks = false
+debug-assertions = false
+
+[profile.release]
+lto = true
+panic = "abort"

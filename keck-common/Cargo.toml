@@ -1,0 +1,12 @@
+[package]
+name = "keck-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enable user-space only features (std, Debug derives, etc.)
+userspace = []
+
+[dependencies]

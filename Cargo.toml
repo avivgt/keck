@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "keck-agent",
+    "keck-common",
+    "keck-controller",
+    "keck-fleet",
+    # keck-ebpf is built separately via aya-build in keck-agent/build.rs
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+thiserror = "2"
+log = "0.4"
