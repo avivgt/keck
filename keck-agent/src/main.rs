@@ -304,14 +304,21 @@ fn enumerate_pods(node_name: &str, total_cpu_uw: u64) -> Vec<PodPowerReport> {
 }
 
 /// Extract pod UID from cgroup content.
+///
+/// OpenShift cgroup v2 format:
+///   0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod<UID>.slice/crio-<CID>.scope
+///
+/// The UID uses underscores instead of hyphens in the cgroup path.
 fn extract_pod_uid(cgroup_content: &str) -> Option<String> {
     for line in cgroup_content.lines() {
         let path = line.rsplit(':').next().unwrap_or("");
-        if let Some(pod_pos) = path.find("pod") {
-            let after_pod = &path[pod_pos + 3..];
-            let uid: String = after_pod
+
+        // Look for "-pod" (not just "pod" — avoid matching "kubepods")
+        if let Some(pos) = path.find("-pod") {
+            let after = &path[pos + 4..]; // skip "-pod"
+            let uid: String = after
                 .chars()
-                .take_while(|c| *c != '/' && *c != '.')
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
                 .collect();
             if uid.len() >= 8 {
                 return Some(uid.replace('_', "-"));
