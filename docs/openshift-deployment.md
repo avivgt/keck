@@ -141,41 +141,19 @@ oc start-build keck-agent --from-dir="$TMPDIR" --follow -n keck-system
 rm -rf "$TMPDIR"
 ```
 
-### 2.4 Build the UI
+### 2.4 Build the UI (OpenShift Console Plugin)
+
+The Keck UI runs as an OpenShift Dynamic Console Plugin called
+"Power Management". It integrates directly into the OpenShift console
+navigation — no separate URL needed.
 
 ```bash
-TMPDIR=$(mktemp -d)
-cp -r keck-ui/* "$TMPDIR/"
-cat > "$TMPDIR/Dockerfile" <<'DOCKER'
-FROM node:22-alpine AS builder
-WORKDIR /app
-COPY package.json ./
-RUN npm install
-COPY . .
-RUN npm run build
+oc new-build --name=keck-power-management --binary --strategy=docker -n keck-system
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
-RUN microdnf install -y nginx && microdnf clean all
-COPY --from=builder /app/dist /usr/share/nginx/html
-RUN printf 'server {\n\
-    listen 8080;\n\
-    root /usr/share/nginx/html;\n\
-    index index.html;\n\
-    location / {\n\
-        try_files $uri $uri/ /index.html;\n\
-    }\n\
-    location /api/ {\n\
-        proxy_pass http://keck-controller.keck-system.svc:8080;\n\
-    }\n\
-}\n' > /etc/nginx/conf.d/default.conf
-EXPOSE 8080
-USER 1001
-CMD ["nginx", "-g", "daemon off;"]
-DOCKER
-
-oc new-build --name=keck-ui --binary --strategy=docker -n keck-system
-oc start-build keck-ui --from-dir="$TMPDIR" --follow -n keck-system
-rm -rf "$TMPDIR"
+oc start-build keck-power-management \
+  --from-dir=keck-ui \
+  --follow \
+  -n keck-system
 ```
 
 ### 2.5 Verify All Images
@@ -321,58 +299,84 @@ oc set image daemonset/keck-agent \
 oc rollout restart daemonset/keck-agent -n keck-system
 ```
 
-### 4.4 Deploy the UI
+### 4.4 Deploy the Power Management Console Plugin
+
+The UI integrates directly into the OpenShift console as "Power Management"
+in the left navigation. No separate URL or route needed.
 
 ```bash
-UI_IMAGE=$(oc get istag keck-ui:latest -n keck-system \
+# Get the plugin image reference
+UI_IMAGE=$(oc get istag keck-power-management:latest -n keck-system \
   -o jsonpath='{.image.dockerImageReference}')
 
-# Create UI deployment
-oc create deployment keck-ui \
-  --image="$UI_IMAGE" \
+# Deploy the plugin (Deployment + Service + ConsolePlugin CR)
+oc apply -f keck-ui/openshift/console-plugin.yaml
+
+# Point to the internally built image
+oc set image deployment/keck-power-management \
+  keck-power-management="$UI_IMAGE" \
   -n keck-system
 
-# Create service
-oc expose deployment keck-ui \
-  --port=8080 \
-  -n keck-system
-
-# Create OpenShift Route (external access)
-oc create route edge keck-ui \
-  --service=keck-ui \
-  --port=8080 \
-  -n keck-system
+# Enable the plugin in the OpenShift console
+bash keck-ui/openshift/enable-plugin.sh
 ```
 
 ### 4.5 Verify Everything
 
 ```bash
 oc get pods -n keck-system
-# NAME                               READY   STATUS    AGE
-# keck-agent-xxxxx                   1/1     Running   ...
-# keck-agent-yyyyy                   1/1     Running   ...
-# keck-controller-xxxxx-yyyyy        1/1     Running   ...
-# keck-operator-xxxxx-yyyyy          1/1     Running   ...
-# keck-ui-xxxxx-yyyyy                1/1     Running   ...
+# NAME                                     READY   STATUS    AGE
+# keck-agent-xxxxx                         1/1     Running   ...
+# keck-agent-yyyyy                         1/1     Running   ...
+# keck-controller-xxxxx-yyyyy              1/1     Running   ...
+# keck-operator-xxxxx-yyyyy                1/1     Running   ...
+# keck-power-management-xxxxx-yyyyy        1/1     Running   ...
 
 oc get keckclusters
 # NAME   AGENTS   CONTROLLER   PHASE     AGE
 # keck   2        true         Running   ...
 
-oc get routes -n keck-system
-# NAME      HOST/PORT                              PATH   SERVICES   PORT
-# keck-ui   keck-ui-keck-system.apps.<cluster>            keck-ui    8080
+oc get consoleplugins
+# NAME                     AGE
+# keck-power-management    ...
 ```
 
-## Step 5: Access the Dashboard
+## Step 5: Access Power Management
 
-Get the dashboard URL:
+After enabling the plugin, refresh the OpenShift console. "Power Management"
+appears in the left navigation under the admin perspective, after Monitoring.
+
+```
+OpenShift Console
+├── Home
+├── Operators
+├── Workloads
+├── Networking
+├── Storage
+├── Monitoring
+├── Power Management        ← Keck
+│   ├── Overview            — Cluster power, carbon, cost
+│   ├── Namespaces          — Per-namespace breakdown (click to drill down)
+│   ├── Nodes               — Per-node power and headroom
+│   ├── Power Budgets       — Budget status and enforcement
+│   └── Carbon & Cost       — Carbon intensity and cost tracking
+├── Compute
+└── ...
+```
+
+No separate URL needed. The plugin uses the console's existing auth,
+styling (PatternFly), and routing.
+
+To verify the plugin is loaded:
 
 ```bash
-oc get route keck-ui -n keck-system -o jsonpath='{.spec.host}'
-```
+# Check plugin is registered
+oc get consoleplugins keck-power-management
 
-Open `https://<route-host>` in your browser.
+# Check console operator has it enabled
+oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'
+# Should include "keck-power-management"
+```
 
 ## Step 6: Configure Power Budgets (Optional)
 

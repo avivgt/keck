@@ -12,8 +12,8 @@
 //! Each level sums to the level above. Error bounds are computed at
 //! every level by reconciling against measured totals.
 
-mod engine;
-mod model;
+pub mod engine;
+pub mod model;
 mod types;
 
 pub use engine::AttributionEngine;

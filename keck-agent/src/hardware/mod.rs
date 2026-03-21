@@ -165,7 +165,7 @@ pub fn discover_sources() -> Vec<Box<dyn PowerSource>> {
             for s in &rapl_sources {
                 log::info!("  {}: {} ({:?})", s.id(), s.name(), s.granularity());
             }
-            sources.extend(rapl_sources.into_iter().map(|s| Box::new(s) as _));
+            sources.extend(rapl_sources.into_iter().map(|s| Box::new(s) as Box<dyn PowerSource>));
         }
         Err(e) => log::warn!("RAPL discovery failed: {}", e),
     }
@@ -174,7 +174,7 @@ pub fn discover_sources() -> Vec<Box<dyn PowerSource>> {
     match rapl::discover_dram() {
         Ok(dram_sources) => {
             log::info!("Discovered {} DRAM RAPL source(s)", dram_sources.len());
-            sources.extend(dram_sources.into_iter().map(|s| Box::new(s) as _));
+            sources.extend(dram_sources.into_iter().map(|s| Box::new(s) as Box<dyn PowerSource>));
         }
         Err(e) => log::debug!("DRAM RAPL not available: {}", e),
     }
@@ -186,7 +186,7 @@ pub fn discover_sources() -> Vec<Box<dyn PowerSource>> {
             for s in &hwmon_sources {
                 log::info!("  {}: {} ({:?})", s.id(), s.name(), s.component());
             }
-            sources.extend(hwmon_sources.into_iter().map(|s| Box::new(s) as _));
+            sources.extend(hwmon_sources.into_iter().map(|s| Box::new(s) as Box<dyn PowerSource>));
         }
         Err(e) => log::debug!("hwmon discovery failed: {}", e),
     }
@@ -195,7 +195,7 @@ pub fn discover_sources() -> Vec<Box<dyn PowerSource>> {
     match gpu::discover() {
         Ok(gpu_sources) => {
             log::info!("Discovered {} GPU source(s)", gpu_sources.len());
-            sources.extend(gpu_sources.into_iter().map(|s| Box::new(s) as _));
+            sources.extend(gpu_sources.into_iter().map(|s| Box::new(s) as Box<dyn PowerSource>));
         }
         Err(e) => log::debug!("GPU discovery failed: {}", e),
     }
@@ -204,7 +204,7 @@ pub fn discover_sources() -> Vec<Box<dyn PowerSource>> {
     match platform::discover() {
         Ok(platform_sources) => {
             log::info!("Discovered {} platform source(s)", platform_sources.len());
-            sources.extend(platform_sources.into_iter().map(|s| Box::new(s) as _));
+            sources.extend(platform_sources);
         }
         Err(e) => log::debug!("Platform source discovery failed: {}", e),
     }

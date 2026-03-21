@@ -21,7 +21,6 @@ mod scheduler;
 use std::sync::Arc;
 
 use aggregator::ClusterAggregator;
-use api::ApiServer;
 use carbon::CarbonTracker;
 use log::info;
 use scheduler::PowerScheduler;

@@ -60,7 +60,7 @@ pub enum PlacementStrategy {
 }
 
 /// Node score from the power-aware scheduler.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct NodeScore {
     pub node_name: String,
     /// Score 0-100 (higher = better placement candidate)

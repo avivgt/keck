@@ -1,0 +1,85 @@
+# Register Keck as an OpenShift console dynamic plugin.
+# This makes "Power Management" appear in the OpenShift console navigation.
+apiVersion: console.openshift.io/v1
+kind: ConsolePlugin
+metadata:
+  name: keck-power-management
+spec:
+  displayName: Power Management
+  backend:
+    type: Service
+    service:
+      name: keck-power-management
+      namespace: keck-system
+      port: 9443
+      basePath: /
+  proxy:
+    - alias: keck-api
+      endpoint:
+        type: Service
+        service:
+          name: keck-controller
+          namespace: keck-system
+          port: 8080
+---
+# Deployment for the plugin assets server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keck-power-management
+  namespace: keck-system
+  labels:
+    app.kubernetes.io/name: keck-power-management
+    app.kubernetes.io/component: console-plugin
+    app.kubernetes.io/part-of: keck
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keck-power-management
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keck-power-management
+    spec:
+      containers:
+        - name: keck-power-management
+          # Image set via: oc set image deployment/keck-power-management ...
+          image: keck-power-management:latest
+          ports:
+            - containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: serving-cert
+              mountPath: /var/serving-cert
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: serving-cert
+          secret:
+            secretName: keck-power-management-cert
+---
+# Service for the console to reach the plugin
+apiVersion: v1
+kind: Service
+metadata:
+  name: keck-power-management
+  namespace: keck-system
+  labels:
+    app.kubernetes.io/name: keck-power-management
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: keck-power-management-cert
+spec:
+  selector:
+    app.kubernetes.io/name: keck-power-management
+  ports:
+    - name: https
+      port: 9443
+      protocol: TCP
+      targetPort: 9443

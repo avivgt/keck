@@ -6,7 +6,8 @@ license.workspace = true
 
 [features]
 default = []
-# Enable user-space only features (std, Debug derives, etc.)
-userspace = []
+# Enable user-space only features (aya::Pod impls, std)
+userspace = ["dep:aya"]
 
 [dependencies]
+aya = { version = "0.13", optional = true }

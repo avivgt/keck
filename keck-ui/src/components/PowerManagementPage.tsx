@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Main Power Management page — the entry point in the OpenShift console.
+// Accessible via the "Power Management" section in the left nav.
+
+import * as React from "react";
+import {
+  Page,
+  PageSection,
+  Title,
+  Card,
+  CardTitle,
+  CardBody,
+  Gallery,
+  GalleryItem,
+  Label,
+  Flex,
+  FlexItem,
+  Spinner,
+  EmptyState,
+  EmptyStateBody,
+} from "@patternfly/react-core";
+import {
+  BoltIcon,
+  LeafIcon,
+  MoneyBillIcon,
+  ServerIcon,
+  CubesIcon,
+} from "@patternfly/react-icons";
+import { api, ClusterPower } from "../utils/api";
+import { formatWatts, formatCarbon, formatCost, formatErrorRatio, errorStatus } from "../utils/format";
+
+const PowerManagementPage: React.FC = () => {
+  const [data, setData] = React.useState<ClusterPower | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    const fetchData = () => {
+      api.getClusterPower()
+        .then(setData)
+        .catch((e) => setError(e.message))
+        .finally(() => setLoading(false));
+    };
+
+    fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) {
+    return (
+      <Page>
+        <PageSection>
+          <Spinner aria-label="Loading power data" />
+        </PageSection>
+      </Page>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <Page>
+        <PageSection>
+          <EmptyState>
+            <Title headingLevel="h2" size="lg">Power Management</Title>
+            <EmptyStateBody>
+              {error || "No power data available. Ensure Keck agent and controller are running."}
+            </EmptyStateBody>
+          </EmptyState>
+        </PageSection>
+      </Page>
+    );
+  }
+
+  return (
+    <Page>
+      <PageSection>
+        <Title headingLevel="h1" size="2xl">
+          <BoltIcon /> Power Management
+        </Title>
+        <p style={{ marginTop: 8, color: "var(--pf-v6-global--Color--200)" }}>
+          Real-time power consumption, carbon emissions, and cost across the cluster.
+          Data refreshes every 5 seconds.
+        </p>
+      </PageSection>
+
+      <PageSection>
+        <Gallery hasGutter minWidths={{ default: "250px" }}>
+          {/* Total Power */}
+          <GalleryItem>
+            <Card isCompact>
+              <CardTitle>
+                <Flex>
+                  <FlexItem><BoltIcon /></FlexItem>
+                  <FlexItem>Total Power</FlexItem>
+                </Flex>
+              </CardTitle>
+              <CardBody>
+                <div style={{ fontSize: "2em", fontWeight: 600 }}>
+                  {formatWatts(data.total_attributed_watts)}
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  Platform: {data.platform_watts > 0 ? formatWatts(data.platform_watts) : "N/A"}
+                </div>
+              </CardBody>
+            </Card>
+          </GalleryItem>
+
+          {/* CPU Power */}
+          <GalleryItem>
+            <Card isCompact>
+              <CardTitle>CPU</CardTitle>
+              <CardBody>
+                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#0066cc" }}>
+                  {formatWatts(data.cpu_watts)}
+                </div>
+              </CardBody>
+            </Card>
+          </GalleryItem>
+
+          {/* Memory Power */}
+          <GalleryItem>
+            <Card isCompact>
+              <CardTitle>Memory</CardTitle>
+              <CardBody>
+                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#6753ac" }}>
+                  {formatWatts(data.memory_watts)}
+                </div>
+              </CardBody>
+            </Card>
+          </GalleryItem>
+
+          {/* GPU Power */}
+          <GalleryItem>
+            <Card isCompact>
+              <CardTitle>GPU</CardTitle>
+              <CardBody>
+                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#3e8635" }}>
+                  {formatWatts(data.gpu_watts)}
+                </div>
+              </CardBody>
+            </Card>
+          </GalleryItem>
+
+          {/* Idle */}
+          <GalleryItem>
+            <Card isCompact>
+              <CardTitle>Idle</CardTitle>
+              <CardBody>
+                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#8a8d90" }}>
+                  {formatWatts(data.idle_watts)}
+                </div>
+              </CardBody>
+            </Card>
+          </GalleryItem>
+
+          {/* Infrastructure */}
+          <GalleryItem>
+            <Card isCompact>
+              <CardTitle>
+                <Flex>
+                  <FlexItem><ServerIcon /></FlexItem>
+                  <FlexItem>Infrastructure</FlexItem>
+                </Flex>
+              </CardTitle>
+              <CardBody>
+                <div>{data.node_count} nodes</div>
+                <div>{data.pod_count} pods</div>
+                <div style={{ marginTop: 8 }}>
+                  Accuracy:{" "}
+                  <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "gold" : "red"}>
+                    {formatErrorRatio(data.avg_error_ratio)}
+                  </Label>
+                </div>
+              </CardBody>
+            </Card>
+          </GalleryItem>
+        </Gallery>
+      </PageSection>
+    </Page>
+  );
+};
+
+export default PowerManagementPage;

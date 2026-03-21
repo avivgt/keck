@@ -1,0 +1,100 @@
+[
+  {
+    "type": "console.navigation/section",
+    "properties": {
+      "id": "power-management",
+      "name": "Power Management",
+      "insertAfter": "monitoring"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "power-overview",
+      "name": "Overview",
+      "href": "/power-management",
+      "section": "power-management",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "power-namespaces",
+      "name": "Namespaces",
+      "href": "/power-management/namespaces",
+      "section": "power-management",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "power-nodes",
+      "name": "Nodes",
+      "href": "/power-management/nodes",
+      "section": "power-management",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "power-budgets",
+      "name": "Power Budgets",
+      "href": "/power-management/budgets",
+      "section": "power-management",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "power-carbon",
+      "name": "Carbon & Cost",
+      "href": "/power-management/carbon",
+      "section": "power-management",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/power-management",
+      "component": {
+        "$codeRef": "PowerManagementPage"
+      }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/power-management/namespaces",
+      "component": {
+        "$codeRef": "ClusterOverview"
+      }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": false,
+      "path": "/power-management/namespaces/:ns",
+      "component": {
+        "$codeRef": "NamespaceView"
+      }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": false,
+      "path": "/power-management/pods/:uid",
+      "component": {
+        "$codeRef": "PodView"
+      }
+    }
+  }
+]

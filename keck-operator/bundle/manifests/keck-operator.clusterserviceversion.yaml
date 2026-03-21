@@ -199,17 +199,28 @@ spec:
         - serviceAccountName: keck-operator
           rules:
             - apiGroups: ["keck.io"]
-              resources: ["*"]
-              verbs: ["*"]
+              resources: ["keckclusters", "keckclusters/status", "keckclusters/finalizers",
+                          "powerbudgets", "powerbudgets/status", "powerbudgets/finalizers",
+                          "powerprofiles", "powerprofiles/status", "powerprofiles/finalizers"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
             - apiGroups: [""]
               resources: ["namespaces", "serviceaccounts", "services", "configmaps"]
-              verbs: ["*"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: [""]
+              resources: ["nodes", "pods"]
+              verbs: ["get", "list", "watch"]
             - apiGroups: ["apps"]
               resources: ["daemonsets", "deployments"]
-              verbs: ["*"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
             - apiGroups: ["rbac.authorization.k8s.io"]
               resources: ["clusterroles", "clusterrolebindings"]
-              verbs: ["*"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: [""]
+              resources: ["events"]
+              verbs: ["create", "patch"]
+            - apiGroups: ["coordination.k8s.io"]
+              resources: ["leases"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
       deployments:
         - name: keck-operator
           spec:

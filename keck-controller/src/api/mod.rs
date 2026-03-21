@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::aggregator::{AgentReport, ClusterAggregator};
+use crate::aggregator::ClusterAggregator;
 use crate::carbon::CarbonTracker;
 
 /// Start the gRPC server that receives agent reports.
@@ -32,7 +32,7 @@ use crate::carbon::CarbonTracker;
 /// Each node agent opens a streaming connection and sends
 /// AgentReport messages every report_interval (default 10s).
 pub async fn start_grpc_server(
-    aggregator: Arc<RwLock<ClusterAggregator>>,
+    _aggregator: Arc<RwLock<ClusterAggregator>>,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // TODO: Implement tonic gRPC server
@@ -58,8 +58,8 @@ pub async fn start_grpc_server(
 
 /// Start the REST API server for dashboards and CLI.
 pub async fn start_rest_server(
-    aggregator: Arc<RwLock<ClusterAggregator>>,
-    carbon: Arc<RwLock<CarbonTracker>>,
+    _aggregator: Arc<RwLock<ClusterAggregator>>,
+    _carbon: Arc<RwLock<CarbonTracker>>,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // TODO: Implement with axum or actix-web
@@ -104,7 +104,7 @@ pub async fn start_rest_server(
 /// Also enables the power-aware scheduler to query pod power metrics
 /// via the standard K8s metrics API.
 pub async fn start_custom_metrics_api(
-    aggregator: Arc<RwLock<ClusterAggregator>>,
+    _aggregator: Arc<RwLock<ClusterAggregator>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // TODO: Implement K8s custom metrics API
     //

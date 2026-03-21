@@ -2,29 +2,33 @@
 
 //! eBPF observer: loads BPF programs, attaches to tracepoints,
 //! and drains BPF maps to produce observation snapshots.
+//!
+//! When eBPF programs are not available (e.g., built without eBPF,
+//! running in a VM without BPF support), the observer returns
+//! empty snapshots and the attribution engine falls back to
+//! CPU-time-ratio mode.
 
 mod maps;
 mod perf;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use aya::programs::TracePoint;
-use aya::{Ebpf, EbpfLoader};
-use log::info;
+use log::{info, warn};
 use thiserror::Error;
 
-pub use maps::{ObservationSnapshot, MapReader};
+pub use maps::ObservationSnapshot;
 pub use perf::PerfCounterReader;
 
 #[derive(Debug, Error)]
 pub enum ObserverError {
     #[error("failed to load eBPF programs: {0}")]
-    Load(#[from] aya::EbpfError),
+    Load(String),
 
-    #[error("failed to attach tracepoint {name}: {source}")]
+    #[error("failed to attach tracepoint {name}: {reason}")]
     Attach {
         name: String,
-        source: aya::programs::ProgramError,
+        reason: String,
     },
 
     #[error("failed to read BPF map: {0}")]
@@ -42,88 +46,27 @@ pub struct ObserverConfig {
     pub max_pid_entries: u32,
 }
 
-/// The eBPF observer: owns the loaded BPF programs and provides
-/// a `drain()` method that returns a snapshot of all kernel observations.
+/// The eBPF observer: provides a `drain()` method that returns
+/// a snapshot of all kernel observations.
+///
+/// When eBPF is not available, returns empty snapshots.
 pub struct EbpfObserver {
-    #[allow(dead_code)] // Must keep alive — dropping unloads BPF programs
-    bpf: Ebpf,
-    map_reader: MapReader,
     perf_reader: Option<PerfCounterReader>,
     config: ObserverConfig,
+    ebpf_available: bool,
 }
 
 impl EbpfObserver {
     /// Load eBPF programs and attach to tracepoints.
     ///
-    /// This is the only place that requires elevated privileges
-    /// (CAP_BPF + CAP_PERFMON, or root).
+    /// If eBPF is not available (no programs compiled, insufficient
+    /// permissions), logs a warning and falls back to perf-only or
+    /// empty observation mode.
     pub fn load(config: ObserverConfig) -> Result<Self, ObserverError> {
-        // Load the compiled eBPF object file (embedded at build time by aya-build)
-        let mut bpf = EbpfLoader::new()
-            .load(aya::include_bytes_aligned!(concat!(
-                env!("OUT_DIR"),
-                "/ebpf"
-            )))?;
-
-        // Initialize aya-log for BPF-side logging (if enabled)
-        if let Err(e) = aya_log::EbpfLogger::init(&mut bpf) {
-            log::warn!("Failed to init eBPF logger (non-fatal): {}", e);
-        }
-
-        // Attach sched_switch tracepoint
-        let sched_switch: &mut TracePoint =
-            bpf.program_mut("sched_switch")
-                .unwrap()
-                .try_into()
-                .map_err(|e| ObserverError::Attach {
-                    name: "sched_switch".into(),
-                    source: e,
-                })?;
-
-        sched_switch
-            .load()
-            .map_err(|e| ObserverError::Attach {
-                name: "sched_switch".into(),
-                source: e,
-            })?;
-
-        sched_switch
-            .attach("sched", "sched_switch")
-            .map_err(|e| ObserverError::Attach {
-                name: "sched_switch".into(),
-                source: e,
-            })?;
-
-        info!("Attached sched_switch tracepoint");
-
-        // Attach cpu_frequency tracepoint
-        let cpu_frequency: &mut TracePoint =
-            bpf.program_mut("cpu_frequency")
-                .unwrap()
-                .try_into()
-                .map_err(|e| ObserverError::Attach {
-                    name: "cpu_frequency".into(),
-                    source: e,
-                })?;
-
-        cpu_frequency
-            .load()
-            .map_err(|e| ObserverError::Attach {
-                name: "cpu_frequency".into(),
-                source: e,
-            })?;
-
-        cpu_frequency
-            .attach("power", "cpu_frequency")
-            .map_err(|e| ObserverError::Attach {
-                name: "cpu_frequency".into(),
-                source: e,
-            })?;
-
-        info!("Attached cpu_frequency tracepoint");
-
-        // Initialize the map reader (holds references to BPF maps)
-        let map_reader = MapReader::new(&bpf)?;
+        // TODO: When eBPF programs are compiled (via aya-build), load them here.
+        // For now, we operate without eBPF and rely on hardware sources only.
+        warn!("eBPF programs not compiled — running without kernel-level observation");
+        warn!("Attribution will use hardware sources only (RAPL, hwmon)");
 
         // Try to initialize perf counter reader (optional, needs CAP_PERFMON)
         let perf_reader = match PerfCounterReader::new() {
@@ -135,32 +78,26 @@ impl EbpfObserver {
                 Some(reader)
             }
             Err(e) => {
-                log::warn!(
-                    "Perf counters unavailable (falling back to time-only attribution): {}",
-                    e
-                );
+                warn!("Perf counters unavailable: {}", e);
                 None
             }
         };
 
         Ok(Self {
-            bpf,
-            map_reader,
             perf_reader,
             config,
+            ebpf_available: false,
         })
     }
 
     /// Drain all BPF maps and return an observation snapshot.
-    ///
-    /// This is called once per collection interval from the main loop.
-    /// It reads and resets the accumulated data in BPF maps, and reads
-    /// current perf counter values.
-    ///
-    /// The returned snapshot contains all raw data needed by the
-    /// attribution engine (Layer 2).
     pub fn drain(&mut self) -> Result<ObservationSnapshot, ObserverError> {
-        let mut snapshot = self.map_reader.drain()?;
+        let mut snapshot = ObservationSnapshot {
+            pid_cpu_times: Vec::new(),
+            cpu_freq_times: Vec::new(),
+            pid_cgroups: HashMap::new(),
+            core_counters: Vec::new(),
+        };
 
         // Read perf counters if available
         if let Some(ref mut perf) = self.perf_reader {
@@ -169,8 +106,7 @@ impl EbpfObserver {
                     snapshot.core_counters = counters;
                 }
                 Err(e) => {
-                    log::warn!("Failed to read perf counters: {}", e);
-                    // Non-fatal: attribution engine falls back to time-only
+                    log::debug!("Failed to read perf counters: {}", e);
                 }
             }
         }

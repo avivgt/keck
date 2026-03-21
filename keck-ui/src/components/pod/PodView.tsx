@@ -1,114 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Pod view: the deepest zoom level in the UI.
-// Shows per-process power with per-core detail.
-// Fleet → Cluster → Namespace → Pod → Process → Core
+// Pod detail view — deepest drill-down level.
+// Shows per-process and per-component power breakdown.
 
-import { Link, useParams } from "react-router-dom";
+import * as React from "react";
+import { useParams, Link } from "react-router-dom";
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
-import { usePodProcesses } from "@/hooks/useKeckData";
-import { formatWatts } from "@/utils/format";
+  Page,
+  PageSection,
+  Title,
+  Breadcrumb,
+  BreadcrumbItem,
+  Card,
+  CardTitle,
+  CardBody,
+  Gallery,
+  GalleryItem,
+  Spinner,
+  EmptyState,
+  EmptyStateBody,
+} from "@patternfly/react-core";
+import { api, PodPower } from "../../utils/api";
+import { formatWatts } from "../../utils/format";
 
-export function PodView() {
+const PodView: React.FC = () => {
   const { uid } = useParams<{ uid: string }>();
-  const { data: processes, isLoading } = usePodProcesses(uid || "");
+  const [pod, setPod] = React.useState<PodPower | null>(null);
+  const [loading, setLoading] = React.useState(true);
 
-  if (!uid) return <div>No pod specified</div>;
-  if (isLoading) return <div>Loading pod detail...</div>;
+  React.useEffect(() => {
+    if (!uid) return;
+    // TODO: fetch pod detail from agent query API
+    setLoading(false);
+  }, [uid]);
 
-  const totalWatts = processes?.reduce(
-    (sum, p) => sum + p.cpu_watts + p.memory_watts + p.gpu_watts,
-    0
-  ) ?? 0;
-
-  // Chart data: per-process power breakdown
-  const chartData = processes?.map((p) => ({
-    name: `${p.comm} (${p.pid})`,
-    cpu: p.cpu_watts,
-    memory: p.memory_watts,
-    gpu: p.gpu_watts,
-  })) ?? [];
+  if (loading) {
+    return <Page><PageSection><Spinner /></PageSection></Page>;
+  }
 
   return (
-    <div>
-      <div className="breadcrumb">
-        <Link to="/">Fleet</Link>
-        <span>/</span>
-        <Link to="/cluster">Cluster</Link>
-        <span>/</span>
-        Pod
-      </div>
+    <Page>
+      <PageSection>
+        <Breadcrumb>
+          <BreadcrumbItem>
+            <Link to="/power-management">Power Management</Link>
+          </BreadcrumbItem>
+          <BreadcrumbItem>
+            <Link to="/power-management/namespaces">Namespaces</Link>
+          </BreadcrumbItem>
+          <BreadcrumbItem isActive>Pod {uid?.slice(0, 8)}</BreadcrumbItem>
+        </Breadcrumb>
 
-      <h2 className="section-title" style={{ marginBottom: 8 }}>
-        Pod Detail
-      </h2>
-      <p style={{ color: "var(--text-secondary)", marginBottom: 24 }}>
-        {processes?.length ?? 0} processes, {formatWatts(totalWatts)} total
-      </p>
+        <Title headingLevel="h1" size="xl" style={{ marginTop: 16 }}>
+          Pod Detail
+        </Title>
+        <p style={{ color: "var(--pf-v6-global--Color--200)" }}>
+          Per-process power breakdown. Requires agent Full profile.
+        </p>
+      </PageSection>
 
-      {/* Process power chart */}
-      {chartData.length > 0 && (
-        <div className="chart-container">
-          <div className="chart-title">Power by Process</div>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={chartData} layout="vertical">
-              <XAxis type="number" tickFormatter={(v) => formatWatts(v)} />
-              <YAxis type="category" dataKey="name" width={200} />
-              <Tooltip
-                formatter={(value: number) => formatWatts(value)}
-                contentStyle={{ background: "#222633", border: "1px solid #2e3344" }}
-              />
-              <Bar dataKey="cpu" stackId="power" fill="#3b82f6" name="CPU" />
-              <Bar dataKey="memory" stackId="power" fill="#8b5cf6" name="Memory" />
-              <Bar dataKey="gpu" stackId="power" fill="#22c55e" name="GPU" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {/* Process table */}
-      {processes && processes.length > 0 ? (
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>PID</th>
-              <th>Command</th>
-              <th>CPU</th>
-              <th>Memory</th>
-              <th>GPU</th>
-              <th>Total</th>
-              <th>Cores</th>
-            </tr>
-          </thead>
-          <tbody>
-            {processes.map((proc) => (
-              <tr key={proc.pid}>
-                <td>{proc.pid}</td>
-                <td><code>{proc.comm}</code></td>
-                <td>{formatWatts(proc.cpu_watts)}</td>
-                <td>{formatWatts(proc.memory_watts)}</td>
-                <td>{formatWatts(proc.gpu_watts)}</td>
-                <td>
-                  {formatWatts(proc.cpu_watts + proc.memory_watts + proc.gpu_watts)}
-                </td>
-                <td>{proc.core_count}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="card">
-          No process data available. The node agent may need Full profile
-          to expose process-level detail.
-        </div>
-      )}
-    </div>
+      <PageSection>
+        <EmptyState>
+          <Title headingLevel="h2" size="lg">Process Detail</Title>
+          <EmptyStateBody>
+            Pod drill-down requires the keck-agent query API to be connected.
+            This will show per-process power with per-core attribution detail.
+          </EmptyStateBody>
+        </EmptyState>
+      </PageSection>
+    </Page>
   );
-}
+};
+
+export default PodView;

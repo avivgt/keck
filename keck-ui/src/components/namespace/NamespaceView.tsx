@@ -1,68 +1,113 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Namespace view: pods in a namespace with power breakdown.
-// Third zoom level (fleet → cluster → namespace).
+// Pod-level power for a specific namespace. Drill-down from ClusterOverview.
 
-import { Link, useParams } from "react-router-dom";
-import { useNamespacePods } from "@/hooks/useKeckData";
-import { formatWatts } from "@/utils/format";
+import * as React from "react";
+import { useParams, useNavigate, Link } from "react-router-dom";
+import {
+  Page,
+  PageSection,
+  Title,
+  Breadcrumb,
+  BreadcrumbItem,
+  Spinner,
+  EmptyState,
+  EmptyStateBody,
+} from "@patternfly/react-core";
+import {
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+} from "@patternfly/react-table";
+import { api, PodPower } from "../../utils/api";
+import { formatWatts } from "../../utils/format";
 
-export function NamespaceView() {
-  const { namespace } = useParams<{ namespace: string }>();
-  const { data: pods, isLoading } = useNamespacePods(namespace || "");
+const NamespaceView: React.FC = () => {
+  const { ns } = useParams<{ ns: string }>();
+  const [pods, setPods] = React.useState<PodPower[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const navigate = useNavigate();
 
-  if (!namespace) return <div>No namespace specified</div>;
-  if (isLoading) return <div>Loading pods...</div>;
+  React.useEffect(() => {
+    if (!ns) return;
+    const fetchData = () => {
+      api.getNamespacePods(ns)
+        .then(setPods)
+        .finally(() => setLoading(false));
+    };
+    fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
+  }, [ns]);
 
-  const totalWatts = pods?.reduce((sum, p) => sum + p.total_watts, 0) ?? 0;
+  if (loading) {
+    return <Page><PageSection><Spinner /></PageSection></Page>;
+  }
+
+  const totalWatts = pods.reduce((sum, p) => sum + p.total_watts, 0);
 
   return (
-    <div>
-      <div className="breadcrumb">
-        <Link to="/">Fleet</Link>
-        <span>/</span>
-        <Link to="/cluster">Cluster</Link>
-        <span>/</span>
-        {namespace}
-      </div>
+    <Page>
+      <PageSection>
+        <Breadcrumb>
+          <BreadcrumbItem>
+            <Link to="/power-management">Power Management</Link>
+          </BreadcrumbItem>
+          <BreadcrumbItem>
+            <Link to="/power-management/namespaces">Namespaces</Link>
+          </BreadcrumbItem>
+          <BreadcrumbItem isActive>{ns}</BreadcrumbItem>
+        </Breadcrumb>
 
-      <h2 className="section-title" style={{ marginBottom: 8 }}>
-        {namespace}
-      </h2>
-      <p style={{ color: "var(--text-secondary)", marginBottom: 24 }}>
-        {pods?.length ?? 0} pods, {formatWatts(totalWatts)} total
-      </p>
+        <Title headingLevel="h1" size="xl" style={{ marginTop: 16 }}>
+          {ns}
+        </Title>
+        <p style={{ color: "var(--pf-v6-global--Color--200)" }}>
+          {pods.length} pods, {formatWatts(totalWatts)} total
+        </p>
+      </PageSection>
 
-      {pods && pods.length > 0 ? (
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Pod</th>
-              <th>Node</th>
-              <th>Total</th>
-              <th>CPU</th>
-              <th>Memory</th>
-              <th>GPU</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pods.map((pod) => (
-              <tr key={pod.pod_uid}>
-                <td>
-                  <Link to={`/pods/${pod.pod_uid}`}>{pod.pod_name}</Link>
-                </td>
-                <td>{pod.node_name}</td>
-                <td>{formatWatts(pod.total_watts)}</td>
-                <td>{formatWatts(pod.cpu_watts)}</td>
-                <td>{formatWatts(pod.memory_watts)}</td>
-                <td>{formatWatts(pod.gpu_watts)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="card">No pods found in this namespace</div>
-      )}
-    </div>
+      <PageSection>
+        {pods.length > 0 ? (
+          <Table aria-label="Pod power table" variant="compact">
+            <Thead>
+              <Tr>
+                <Th>Pod</Th>
+                <Th>Node</Th>
+                <Th>Total</Th>
+                <Th>CPU</Th>
+                <Th>Memory</Th>
+                <Th>GPU</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {pods.map((pod) => (
+                <Tr
+                  key={pod.pod_uid}
+                  isClickable
+                  onRowClick={() => navigate(`/power-management/pods/${pod.pod_uid}`)}
+                >
+                  <Td>{pod.pod_name}</Td>
+                  <Td>{pod.node_name}</Td>
+                  <Td>{formatWatts(pod.total_watts)}</Td>
+                  <Td>{formatWatts(pod.cpu_watts)}</Td>
+                  <Td>{formatWatts(pod.memory_watts)}</Td>
+                  <Td>{formatWatts(pod.gpu_watts)}</Td>
+                </Tr>
+              ))}
+            </Tbody>
+          </Table>
+        ) : (
+          <EmptyState>
+            <EmptyStateBody>No pods found in namespace {ns}.</EmptyStateBody>
+          </EmptyState>
+        )}
+      </PageSection>
+    </Page>
   );
-}
+};
+
+export default NamespaceView;

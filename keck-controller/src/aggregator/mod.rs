@@ -104,7 +104,9 @@ pub struct NodeSummary {
     /// Available power headroom (for scheduler)
     /// platform_uw - (cpu + memory + gpu)
     pub headroom_uw: Option<u64>,
+    #[serde(skip)]
     pub last_seen: Instant,
+    pub last_seen_secs_ago: u64,
 }
 
 /// The cluster aggregator.
@@ -142,7 +144,7 @@ impl ClusterAggregator {
     /// (they've been terminated or moved).
     pub fn ingest(&mut self, report: AgentReport) {
         let now = Instant::now();
-        let node_name = &report.node.node_name;
+        let node_name = report.node.node_name.clone();
 
         // Update node state
         self.nodes.insert(
@@ -158,7 +160,7 @@ impl ClusterAggregator {
 
         // Remove pods previously on this node that are no longer reported
         self.pods.retain(|uid, state| {
-            if state.report.node_name == *node_name && !reported_uids.contains(uid) {
+            if state.report.node_name == node_name && !reported_uids.contains(uid) {
                 false // Pod was on this node but no longer reported → terminated
             } else {
                 true
@@ -285,6 +287,7 @@ impl ClusterAggregator {
                     pod_count: r.pod_count,
                     headroom_uw: headroom,
                     last_seen: state.received_at,
+                    last_seen_secs_ago: state.received_at.elapsed().as_secs(),
                 }
             })
             .collect()

@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: manager
-          image: ghcr.io/avivgt/keck-operator:latest
+          image: image-registry.openshift-image-registry.svc:5000/keck-system/keck-operator:latest
           command: ["/manager"]
           args:
             - --leader-elect
