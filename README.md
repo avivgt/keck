@@ -176,21 +176,260 @@ cargo build -p keck-controller
 
 # Build fleet manager
 cargo build -p keck-fleet
+
+# Build operator
+cd keck-operator && make build
+```
+
+## Deployment
+
+### Option 1: OpenShift / OLM (Recommended for Production)
+
+The Keck operator follows the Red Hat Operator Lifecycle Manager (OLM)
+standard. It can be installed from OperatorHub or from a custom catalog.
+
+```bash
+# Build and push all images
+cd keck-operator
+make release   # builds: operator, bundle, catalog images
+
+# Add Keck catalog to the cluster
+make catalog-deploy
+
+# Install the operator via OLM Subscription
+make subscription-deploy
+```
+
+After the operator is installed, create a `KeckCluster` resource to
+deploy Keck to your cluster:
+
+```yaml
+apiVersion: keck.io/v1alpha1
+kind: KeckCluster
+metadata:
+  name: keck
+spec:
+  agent:
+    defaultProfile: standard
+    gpuEnabled: false
+  controller:
+    replicas: 1
+    schedulerEnabled: false
+    carbonRegion: "US-CAL-CISO"
+    energyCostPerKWh: "0.10"
+  image:
+    repository: ghcr.io/avivgt/keck
+    tag: latest
+```
+
+```bash
+kubectl apply -f keck-operator/config/samples/keckcluster.yaml
+```
+
+The operator will create:
+- `keck-system` namespace
+- `keck-agent` DaemonSet (one agent per node, privileged)
+- `keck-controller` Deployment
+- ServiceAccount, ClusterRole, ClusterRoleBinding
+- Services for controller gRPC and HTTP endpoints
+
+**Verify:**
+```bash
+kubectl get keckclusters
+# NAME   AGENTS   CONTROLLER   PHASE     AGE
+# keck   12       true         Running   2m
+
+kubectl get pods -n keck-system
+# NAME                               READY   STATUS    RESTARTS   AGE
+# keck-agent-xxxxx                   1/1     Running   0          2m
+# keck-agent-yyyyy                   1/1     Running   0          2m
+# keck-controller-zzzzz-aaaaa        1/1     Running   0          2m
+```
+
+### Option 2: Direct Deployment (Without OLM)
+
+For clusters without OLM (vanilla Kubernetes, k3s, etc.):
+
+```bash
+cd keck-operator
+
+# Install CRDs
+make install
+
+# Deploy operator, RBAC, and manager
+make deploy
+
+# Create KeckCluster
+kubectl apply -f config/samples/keckcluster.yaml
+```
+
+To remove:
+```bash
+make undeploy
+```
+
+### Option 3: Local Development
+
+Run the operator outside the cluster for development:
+
+```bash
+cd keck-operator
+
+# Install CRDs into your dev cluster
+make install
+
+# Run operator locally (uses ~/.kube/config)
+make run
+```
+
+### Setting Power Budgets
+
+Limit power consumption per namespace:
+
+```yaml
+apiVersion: keck.io/v1alpha1
+kind: PowerBudget
+metadata:
+  name: ml-training-budget
+  namespace: ml-training
+spec:
+  maxWatts: 10000
+  action: reject   # alert | throttle | reject
+```
+
+```bash
+kubectl apply -f keck-operator/config/samples/powerbudget.yaml
+
+kubectl get powerbudgets -A
+# NAMESPACE      NAME                 BUDGET (W)   CURRENT (W)   USAGE   EXCEEDED
+# ml-training    ml-training-budget   10000        7234          72%     false
+```
+
+### Customizing Agent Profiles Per Node
+
+Use `PowerProfile` to override the agent profile on specific nodes:
+
+```yaml
+# Full metering on GPU nodes
+apiVersion: keck.io/v1alpha1
+kind: PowerProfile
+metadata:
+  name: gpu-nodes-full
+spec:
+  profile: full
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  gpuEnabled: true
+---
+# Minimal overhead on edge nodes
+apiVersion: keck.io/v1alpha1
+kind: PowerProfile
+metadata:
+  name: edge-minimal
+spec:
+  profile: minimal
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+```
+
+```bash
+kubectl apply -f keck-operator/config/samples/powerprofile.yaml
+
+kubectl get powerprofiles
+# NAME              PROFILE   NODES   AGE
+# gpu-nodes-full    full      4       1m
+# edge-minimal      minimal   2       1m
+```
+
+### Multi-Cluster Setup (Fleet Manager)
+
+For multi-cluster deployments, run the fleet manager separately and
+point each cluster's controller to it:
+
+```yaml
+apiVersion: keck.io/v1alpha1
+kind: KeckCluster
+metadata:
+  name: keck
+spec:
+  # ... agent and controller config ...
+  fleetEndpoint: "fleet-manager.example.com:9091"
+```
+
+The fleet manager aggregates data from all clusters and provides:
+- Unified dashboard at `http://<fleet-manager>:8090`
+- Per-team power/carbon/cost views
+- Carbon-aware routing recommendations
+- Policy enforcement across clusters
+- ESG reporting
+
+### Accessing the Dashboard
+
+The Keck UI is served by the controller:
+
+```bash
+# Port-forward to access locally
+kubectl port-forward -n keck-system svc/keck-controller 8080:8080
+
+# Open in browser
+open http://localhost:8080
+```
+
+Or expose via Ingress/Route:
+
+```yaml
+# OpenShift Route
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keck-dashboard
+  namespace: keck-system
+spec:
+  to:
+    kind: Service
+    name: keck-controller
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+```
+
+### Prometheus Integration
+
+Keck agents expose Prometheus metrics on each node. Add a ServiceMonitor
+for automatic scraping:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keck-agent
+  namespace: keck-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keck-agent
+  endpoints:
+    - port: metrics
+      interval: 15s
 ```
 
 ## Status
 
-**Early development.** The architecture and core algorithms are implemented
-(~6,300 lines of Rust). The following integrations need to be completed
-before first deployment:
+**Early development.** The architecture, core algorithms, operator, and UI
+are implemented. The following integrations need to be completed before
+first deployment:
 
+- [x] Kubernetes operator with OLM bundle
+- [x] CRDs: KeckCluster, PowerBudget, PowerProfile
+- [x] React dashboard with zoom model
 - [ ] GPU power reading (NVIDIA NVML)
 - [ ] Redfish/IPMI HTTP client
 - [ ] Kubelet API client for cgroup resolution
 - [ ] gRPC wiring between agent ↔ controller ↔ fleet
 - [ ] REST API servers (axum)
 - [ ] Prometheus metric registration
-- [ ] Kubernetes manifests (Helm chart, DaemonSet, Deployment)
+- [ ] Container images (agent, controller, fleet)
 - [ ] Linux build validation and testing
 - [ ] Benchmark: agent overhead vs Kepler
 
