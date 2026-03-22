@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Enumerate pods with real K8s metadata
-        let pods = enumerate_pods(&node_name, cpu_uw, &pod_cache);
+        let pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache);
         let pod_count = pods.len() as u32;
 
         let report = AgentReport {
@@ -357,6 +357,7 @@ fn count_unique_namespaces(_node: &str, cache: &HashMap<String, PodInfo>) -> usi
 fn enumerate_pods(
     node_name: &str,
     total_cpu_uw: u64,
+    total_mem_uw: u64,
     pod_cache: &HashMap<String, PodInfo>,
 ) -> Vec<PodPowerReport> {
     let mut pod_process_count: HashMap<String, u32> = HashMap::new();
@@ -398,6 +399,7 @@ fn enumerate_pods(
                 0.0
             };
             let pod_cpu_uw = (total_cpu_uw as f64 * ratio) as u64;
+            let pod_mem_uw = (total_mem_uw as f64 * ratio) as u64;
 
             // Resolve pod name and namespace from K8s API cache
             let (pod_name, namespace) = match pod_cache.get(pod_uid) {
@@ -411,9 +413,9 @@ fn enumerate_pods(
                 pod_name,
                 namespace,
                 cpu_uw: pod_cpu_uw,
-                memory_uw: 0,
+                memory_uw: pod_mem_uw,
                 gpu_uw: 0,
-                total_uw: pod_cpu_uw,
+                total_uw: pod_cpu_uw + pod_mem_uw,
                 timestamp: SystemTime::now(),
             }
         })
