@@ -60,6 +60,6 @@ export interface PodPower {
 export const api = {
   getClusterPower: () => get<ClusterPower>("/api/v1/cluster"),
   getNamespaces: () => get<NamespacePower[]>("/api/v1/namespaces"),
-  getNamespacePods: (ns: string) => get<PodPower[]>(`/api/v1/namespaces/${ns}`),
+  getNamespacePods: (ns: string) => get<PodPower[]>(`/api/v1/pods-by-namespace?ns=${encodeURIComponent(ns)}`),
   getNodes: () => get<NodeSummary[]>("/api/v1/nodes"),
 };

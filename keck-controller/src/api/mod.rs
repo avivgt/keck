@@ -12,12 +12,13 @@
 //!   GET  /api/v1/pods/:uid           — single pod power
 //!   GET  /healthz                    — health check
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
     Router,
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -40,10 +41,10 @@ pub async fn start_rest_server(
         // Read endpoints
         .route("/api/v1/cluster", get(handle_cluster))
         .route("/api/v1/namespaces", get(handle_namespaces))
-        .route("/api/v1/namespaces/{ns}", get(handle_namespace_pods))
+        .route("/api/v1/pods-by-namespace", get(handle_namespace_pods))
         .route("/api/v1/nodes", get(handle_nodes))
-        .route("/api/v1/nodes/{name}", get(handle_node))
-        .route("/api/v1/pods/{uid}", get(handle_pod))
+        .route("/api/v1/pods-by-node", get(handle_node))
+        .route("/api/v1/pods-by-uid", get(handle_pod))
         // Health check
         .route("/healthz", get(handle_healthz))
         // CORS for console plugin
@@ -120,11 +121,12 @@ async fn handle_namespaces(
     Json(serde_json::Value::Array(ns_list))
 }
 
-/// GET /api/v1/namespaces/:ns — pods in a namespace.
+/// GET /api/v1/pods-by-namespace?ns=<namespace> — pods in a namespace.
 async fn handle_namespace_pods(
     State(aggregator): State<AppState>,
-    Path(ns): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
+    let ns = params.get("ns").cloned().unwrap_or_default();
     let agg = aggregator.read().await;
     let pods = agg.pods_in_namespace(&ns);
 
@@ -175,11 +177,12 @@ async fn handle_nodes(
     Json(serde_json::Value::Array(node_list))
 }
 
-/// GET /api/v1/nodes/:name — single node.
+/// GET /api/v1/pods-by-node?name=<node> — single node.
 async fn handle_node(
     State(aggregator): State<AppState>,
-    Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let name = params.get("name").cloned().unwrap_or_default();
     let agg = aggregator.read().await;
     let node = agg.node_summary(&name).ok_or(StatusCode::NOT_FOUND)?;
 
@@ -195,11 +198,12 @@ async fn handle_node(
     })))
 }
 
-/// GET /api/v1/pods/:uid — single pod.
+/// GET /api/v1/pods-by-uid?uid=<uid> — single pod.
 async fn handle_pod(
     State(aggregator): State<AppState>,
-    Path(uid): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let uid = params.get("uid").cloned().unwrap_or_default();
     let agg = aggregator.read().await;
     let pod = agg.pod_power(&uid).ok_or(StatusCode::NOT_FOUND)?;
 
