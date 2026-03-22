@@ -126,6 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Previous readings for delta computation
     let mut prev_readings: HashMap<String, u64> = HashMap::new();
 
+    // Per-process CPU ticks cache for computing deltas
+    let mut prev_cpu_ticks: HashMap<u32, u64> = HashMap::new();
+    let mut tick_count: u32 = 0;
+
     // Pod metadata cache: uid → (name, namespace)
     let mut pod_cache: HashMap<String, PodInfo> = HashMap::new();
     let mut last_pod_refresh = std::time::Instant::now();
@@ -222,7 +226,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Enumerate pods with real K8s metadata
-        let pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache);
+        // Enumerate pods with real per-process CPU time and RSS attribution
+        let pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks);
+
+        // Periodically clean up stale PIDs from the cache
+        tick_count += 1;
+        if tick_count % 30 == 0 {
+            cleanup_stale_pids(&mut prev_cpu_ticks);
+        }
         let pod_count = pods.len() as u32;
 
         let report = AgentReport {
@@ -351,16 +362,77 @@ fn count_unique_namespaces(_node: &str, cache: &HashMap<String, PodInfo>) -> usi
     ns.len()
 }
 
-// ─── Pod enumeration ─────────────────────────────────────────────
+// ─── Pod enumeration with real per-process metrics ───────────────
 
-/// Enumerate pods by scanning /proc cgroups and resolving via K8s API cache.
+/// Per-process metrics read from /proc/[pid]/stat and /proc/[pid]/statm.
+struct ProcessMetrics {
+    pod_uid: String,
+    /// CPU time in clock ticks (utime + stime)
+    cpu_ticks: u64,
+    /// Resident set size in pages
+    rss_pages: u64,
+}
+
+/// Read CPU time (utime + stime) from /proc/[pid]/stat.
+///
+/// Fields in /proc/[pid]/stat (space-separated, 1-indexed):
+///   field 14: utime — user mode CPU time in clock ticks
+///   field 15: stime — kernel mode CPU time in clock ticks
+fn read_cpu_ticks(pid_str: &str) -> Option<u64> {
+    let stat_path = format!("{}/{}/stat", procfs_root(), pid_str);
+    let content = fs::read_to_string(&stat_path).ok()?;
+
+    // The comm field (field 2) can contain spaces and parens, so find
+    // the last ')' to skip past it reliably.
+    let after_comm = content.rsplit_once(')')?.1;
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+
+    // After the closing ')': field index 0 = state (field 3 in stat)
+    // utime is field 14 in stat = index 11 after ')'
+    // stime is field 15 in stat = index 12 after ')'
+    if fields.len() < 13 {
+        return None;
+    }
+
+    let utime: u64 = fields[11].parse().ok()?;
+    let stime: u64 = fields[12].parse().ok()?;
+    Some(utime + stime)
+}
+
+/// Read RSS (resident set size) from /proc/[pid]/statm.
+///
+/// /proc/[pid]/statm fields (space-separated):
+///   field 1: total program size (pages)
+///   field 2: RSS (pages) — this is what we want
+fn read_rss_pages(pid_str: &str) -> Option<u64> {
+    let statm_path = format!("{}/{}/statm", procfs_root(), pid_str);
+    let content = fs::read_to_string(&statm_path).ok()?;
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    if fields.len() < 2 {
+        return None;
+    }
+    fields[1].parse().ok()
+}
+
+/// Enumerate pods with accurate per-process attribution.
+///
+/// Power is distributed based on:
+///   CPU power → proportional to each pod's CPU time delta (utime + stime)
+///   Memory power → proportional to each pod's RSS (resident set size)
+///
+/// This is significantly more accurate than process-count-based attribution
+/// because a pod running at 100% CPU gets proportionally more power than
+/// an idle pod, and a pod with 4GB RSS gets more memory power than one
+/// with 100MB.
 fn enumerate_pods(
     node_name: &str,
     total_cpu_uw: u64,
     total_mem_uw: u64,
     pod_cache: &HashMap<String, PodInfo>,
+    prev_cpu_ticks: &mut HashMap<u32, u64>,
 ) -> Vec<PodPowerReport> {
-    let mut pod_process_count: HashMap<String, u32> = HashMap::new();
+    // Phase 1: Scan /proc and collect per-process metrics
+    let mut process_metrics: Vec<ProcessMetrics> = Vec::new();
 
     let proc_entries = match fs::read_dir(procfs_root()) {
         Ok(entries) => entries,
@@ -373,35 +445,86 @@ fn enumerate_pods(
             continue;
         }
 
+        // Check if this process belongs to a pod
         let cgroup_path = format!("{}/{}/cgroup", procfs_root(), pid_str);
         let cgroup_content = match fs::read_to_string(&cgroup_path) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        if let Some(pod_uid) = extract_pod_uid(&cgroup_content) {
-            *pod_process_count.entry(pod_uid).or_default() += 1;
-        }
+        let pod_uid = match extract_pod_uid(&cgroup_content) {
+            Some(uid) => uid,
+            None => continue,
+        };
+
+        // Read CPU time
+        let current_ticks = match read_cpu_ticks(&pid_str) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Compute CPU time delta since last read
+        let pid: u32 = pid_str.parse().unwrap_or(0);
+        let prev = prev_cpu_ticks.get(&pid).copied().unwrap_or(current_ticks);
+        let cpu_delta = current_ticks.saturating_sub(prev);
+        prev_cpu_ticks.insert(pid, current_ticks);
+
+        // Read RSS
+        let rss = read_rss_pages(&pid_str).unwrap_or(0);
+
+        process_metrics.push(ProcessMetrics {
+            pod_uid,
+            cpu_ticks: cpu_delta,
+            rss_pages: rss,
+        });
     }
 
-    if pod_process_count.is_empty() {
+    if process_metrics.is_empty() {
         return Vec::new();
     }
 
-    let total_processes: u32 = pod_process_count.values().sum();
+    // Phase 2: Aggregate per-process metrics to per-pod
+    struct PodMetrics {
+        cpu_ticks: u64,
+        rss_pages: u64,
+    }
 
-    pod_process_count
+    let mut pod_metrics: HashMap<String, PodMetrics> = HashMap::new();
+
+    for pm in &process_metrics {
+        let entry = pod_metrics.entry(pm.pod_uid.clone()).or_insert(PodMetrics {
+            cpu_ticks: 0,
+            rss_pages: 0,
+        });
+        entry.cpu_ticks += pm.cpu_ticks;
+        entry.rss_pages += pm.rss_pages;
+    }
+
+    // Phase 3: Compute totals for normalization
+    let total_cpu_ticks: u64 = pod_metrics.values().map(|m| m.cpu_ticks).sum();
+    let total_rss: u64 = pod_metrics.values().map(|m| m.rss_pages).sum();
+
+    // Phase 4: Attribute power proportionally
+    pod_metrics
         .iter()
-        .map(|(pod_uid, count)| {
-            let ratio = if total_processes > 0 {
-                *count as f64 / total_processes as f64
+        .map(|(pod_uid, metrics)| {
+            // CPU power proportional to CPU time consumed
+            let cpu_ratio = if total_cpu_ticks > 0 {
+                metrics.cpu_ticks as f64 / total_cpu_ticks as f64
             } else {
                 0.0
             };
-            let pod_cpu_uw = (total_cpu_uw as f64 * ratio) as u64;
-            let pod_mem_uw = (total_mem_uw as f64 * ratio) as u64;
+            let pod_cpu_uw = (total_cpu_uw as f64 * cpu_ratio) as u64;
 
-            // Resolve pod name and namespace from K8s API cache
+            // Memory power proportional to RSS (resident memory)
+            let mem_ratio = if total_rss > 0 {
+                metrics.rss_pages as f64 / total_rss as f64
+            } else {
+                0.0
+            };
+            let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
+
+            // Resolve pod name and namespace
             let (pod_name, namespace) = match pod_cache.get(pod_uid) {
                 Some(info) => (info.name.clone(), info.namespace.clone()),
                 None => (pod_uid.clone(), "unknown".into()),
@@ -420,6 +543,21 @@ fn enumerate_pods(
             }
         })
         .collect()
+}
+
+/// Clean up stale PIDs from the CPU ticks cache.
+/// Called periodically to prevent unbounded growth.
+fn cleanup_stale_pids(prev_cpu_ticks: &mut HashMap<u32, u64>) {
+    let active_pids: std::collections::HashSet<u32> = fs::read_dir(procfs_root())
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    prev_cpu_ticks.retain(|pid, _| active_pids.contains(pid));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
