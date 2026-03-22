@@ -10,7 +10,7 @@ aya-log-ebpf = "0.1"
 keck-common = { path = "../keck-common" }
 
 [[bin]]
-name = "keck-ebpf"
+name = "ebpf"
 path = "src/main.rs"
 
 [profile.dev]

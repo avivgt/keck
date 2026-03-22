@@ -1,120 +1,141 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! eBPF observer: loads BPF programs, attaches to tracepoints,
-//! and drains BPF maps to produce observation snapshots.
-//!
-//! When eBPF programs are not available (e.g., built without eBPF,
-//! running in a VM without BPF support), the observer returns
-//! empty snapshots and the attribution engine falls back to
-//! CPU-time-ratio mode.
-
-mod maps;
-mod perf;
+//! and drains BPF maps for per-PID per-core CPU time data.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use aya::maps::{HashMap as BpfHashMap, MapData};
+use aya::programs::TracePoint;
+use aya::{Ebpf, EbpfLoader};
+use keck_common::{CpuFreqKey, CpuFreqTime, PidCgroupValue, PidCpuKey, PidCpuTime};
 use log::{info, warn};
 use thiserror::Error;
 
-pub use maps::ObservationSnapshot;
-pub use perf::PerfCounterReader;
-
 #[derive(Debug, Error)]
 pub enum ObserverError {
-    #[error("failed to load eBPF programs: {0}")]
-    Load(String),
-
-    #[error("failed to attach tracepoint {name}: {reason}")]
-    Attach {
-        name: String,
-        reason: String,
-    },
-
-    #[error("failed to read BPF map: {0}")]
-    MapRead(String),
-
-    #[error("perf counter error: {0}")]
-    PerfCounter(String),
+    #[error("ebpf error: {0}")]
+    Ebpf(String),
 }
 
-pub struct ObserverConfig {
-    /// How often to drain BPF maps (collection interval)
-    pub drain_interval: Duration,
-
-    /// Maximum PID entries in BPF maps (determines kernel memory usage)
-    pub max_pid_entries: u32,
+/// Per-PID per-core time data from eBPF.
+pub struct EbpfSnapshot {
+    /// (cpu, pid) → nanoseconds on that core this interval
+    pub pid_cpu_times: Vec<(u32, u32, u64)>,
+    /// (cpu, freq_khz) → nanoseconds at that frequency
+    pub cpu_freq_times: Vec<(u32, u32, u64)>,
+    /// pid → cgroup_id
+    pub pid_cgroups: HashMap<u32, u64>,
 }
 
-/// The eBPF observer: provides a `drain()` method that returns
-/// a snapshot of all kernel observations.
-///
-/// When eBPF is not available, returns empty snapshots.
 pub struct EbpfObserver {
-    perf_reader: Option<PerfCounterReader>,
-    config: ObserverConfig,
-    ebpf_available: bool,
+    bpf: Ebpf,
 }
 
 impl EbpfObserver {
     /// Load eBPF programs and attach to tracepoints.
-    ///
-    /// If eBPF is not available (no programs compiled, insufficient
-    /// permissions), logs a warning and falls back to perf-only or
-    /// empty observation mode.
-    pub fn load(config: ObserverConfig) -> Result<Self, ObserverError> {
-        // TODO: When eBPF programs are compiled (via aya-build), load them here.
-        // For now, we operate without eBPF and rely on hardware sources only.
-        warn!("eBPF programs not compiled — running without kernel-level observation");
-        warn!("Attribution will use hardware sources only (RAPL, hwmon)");
+    pub fn load() -> Result<Self, ObserverError> {
+        let mut bpf = EbpfLoader::new()
+            .load(aya::include_bytes_aligned!(concat!(
+                env!("OUT_DIR"),
+                "/ebpf"
+            )))
+            .map_err(|e| ObserverError::Ebpf(format!("load: {}", e)))?;
 
-        // Try to initialize perf counter reader (optional, needs CAP_PERFMON)
-        let perf_reader = match PerfCounterReader::new() {
-            Ok(reader) => {
-                info!(
-                    "Perf counters enabled: instructions, cycles, cache_misses on {} cores",
-                    reader.num_cores()
-                );
-                Some(reader)
-            }
-            Err(e) => {
-                warn!("Perf counters unavailable: {}", e);
-                None
-            }
-        };
+        // Attach sched_switch
+        let prog: &mut TracePoint = bpf
+            .program_mut("sched_switch")
+            .ok_or_else(|| ObserverError::Ebpf("sched_switch program not found".into()))?
+            .try_into()
+            .map_err(|e| ObserverError::Ebpf(format!("sched_switch cast: {}", e)))?;
+        prog.load()
+            .map_err(|e| ObserverError::Ebpf(format!("sched_switch load: {}", e)))?;
+        prog.attach("sched", "sched_switch")
+            .map_err(|e| ObserverError::Ebpf(format!("sched_switch attach: {}", e)))?;
+        info!("eBPF: attached sched_switch tracepoint");
 
-        Ok(Self {
-            perf_reader,
-            config,
-            ebpf_available: false,
-        })
+        // Attach cpu_frequency
+        let prog: &mut TracePoint = bpf
+            .program_mut("cpu_frequency")
+            .ok_or_else(|| ObserverError::Ebpf("cpu_frequency program not found".into()))?
+            .try_into()
+            .map_err(|e| ObserverError::Ebpf(format!("cpu_frequency cast: {}", e)))?;
+        prog.load()
+            .map_err(|e| ObserverError::Ebpf(format!("cpu_frequency load: {}", e)))?;
+        prog.attach("power", "cpu_frequency")
+            .map_err(|e| ObserverError::Ebpf(format!("cpu_frequency attach: {}", e)))?;
+        info!("eBPF: attached cpu_frequency tracepoint");
+
+        Ok(Self { bpf })
     }
 
-    /// Drain all BPF maps and return an observation snapshot.
-    pub fn drain(&mut self) -> Result<ObservationSnapshot, ObserverError> {
-        let mut snapshot = ObservationSnapshot {
-            pid_cpu_times: Vec::new(),
-            cpu_freq_times: Vec::new(),
-            pid_cgroups: HashMap::new(),
-            core_counters: Vec::new(),
-        };
+    /// Drain BPF maps: read all entries and delete them.
+    /// Returns per-PID per-core time data for this interval.
+    pub fn drain(&mut self) -> Result<EbpfSnapshot, ObserverError> {
+        let mut pid_cpu_times = Vec::new();
+        let mut cpu_freq_times = Vec::new();
+        let mut pid_cgroups = HashMap::new();
 
-        // Read perf counters if available
-        if let Some(ref mut perf) = self.perf_reader {
-            match perf.read_all_cores() {
-                Ok(counters) => {
-                    snapshot.core_counters = counters;
+        // Drain PID_CPU_TIME map
+        {
+            let mut map: BpfHashMap<&mut MapData, PidCpuKey, PidCpuTime> =
+                BpfHashMap::try_from(self.bpf.map_mut("PID_CPU_TIME").ok_or_else(|| {
+                    ObserverError::Ebpf("PID_CPU_TIME map not found".into())
+                })?)
+                .map_err(|e| ObserverError::Ebpf(format!("PID_CPU_TIME cast: {}", e)))?;
+
+            let mut keys_to_delete = Vec::new();
+            for item in map.iter() {
+                if let Ok((key, value)) = item {
+                    pid_cpu_times.push((key.cpu, key.pid, value.time_ns));
+                    keys_to_delete.push(key);
                 }
-                Err(e) => {
-                    log::debug!("Failed to read perf counters: {}", e);
+            }
+            for key in &keys_to_delete {
+                let _ = map.remove(key);
+            }
+        }
+
+        // Drain CPU_FREQ_TIME map
+        {
+            let mut map: BpfHashMap<&mut MapData, CpuFreqKey, CpuFreqTime> =
+                BpfHashMap::try_from(self.bpf.map_mut("CPU_FREQ_TIME").ok_or_else(|| {
+                    ObserverError::Ebpf("CPU_FREQ_TIME map not found".into())
+                })?)
+                .map_err(|e| ObserverError::Ebpf(format!("CPU_FREQ_TIME cast: {}", e)))?;
+
+            let mut keys_to_delete = Vec::new();
+            for item in map.iter() {
+                if let Ok((key, value)) = item {
+                    cpu_freq_times.push((key.cpu, key.freq_khz, value.time_ns));
+                    keys_to_delete.push(key);
+                }
+            }
+            for key in &keys_to_delete {
+                let _ = map.remove(key);
+            }
+        }
+
+        // Read PID_CGROUP map (don't drain — it's a living mapping)
+        {
+            let mut map: BpfHashMap<&mut MapData, u32, PidCgroupValue> =
+                BpfHashMap::try_from(self.bpf.map_mut("PID_CGROUP").ok_or_else(|| {
+                    ObserverError::Ebpf("PID_CGROUP map not found".into())
+                })?)
+                .map_err(|e| ObserverError::Ebpf(format!("PID_CGROUP cast: {}", e)))?;
+
+            for item in map.iter() {
+                if let Ok((pid, value)) = item {
+                    pid_cgroups.insert(pid, value.cgroup_id);
                 }
             }
         }
 
-        Ok(snapshot)
-    }
-
-    pub fn config(&self) -> &ObserverConfig {
-        &self.config
+        Ok(EbpfSnapshot {
+            pid_cpu_times,
+            cpu_freq_times,
+            pid_cgroups,
+        })
     }
 }
