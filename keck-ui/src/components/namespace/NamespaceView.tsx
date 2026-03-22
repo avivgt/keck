@@ -3,7 +3,7 @@
 // Pod-level power for a specific namespace. Drill-down from ClusterOverview.
 
 import * as React from "react";
-import { useParams, useHistory, Link } from "react-router-dom";
+import { Link } from "react-router-dom";
 import {
   Page,
   PageSection,
@@ -25,26 +25,92 @@ import {
 import { api, PodPower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
 
+/** Extract namespace from URL path: /power-management/namespaces/<ns> */
+function getNamespaceFromURL(): string {
+  const path = window.location.pathname;
+  const prefix = "/power-management/namespaces/";
+  const idx = path.indexOf(prefix);
+  if (idx >= 0) {
+    const rest = path.slice(idx + prefix.length);
+    // Take everything up to the next / or end
+    const ns = rest.split("/")[0];
+    return decodeURIComponent(ns);
+  }
+  return "";
+}
+
 const NamespaceView: React.FC = () => {
-  const { ns } = useParams<{ ns: string }>();
+  const [ns, setNs] = React.useState(() => getNamespaceFromURL());
   const [pods, setPods] = React.useState<PodPower[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const history = useHistory();
+  const [error, setError] = React.useState<string | null>(null);
+
+  // Update ns if URL changes
+  React.useEffect(() => {
+    const checkUrl = () => {
+      const current = getNamespaceFromURL();
+      if (current && current !== ns) {
+        setNs(current);
+      }
+    };
+    checkUrl();
+    // Poll for URL changes (console plugin routing may not trigger re-renders)
+    const interval = setInterval(checkUrl, 500);
+    return () => clearInterval(interval);
+  }, [ns]);
 
   React.useEffect(() => {
-    if (!ns) return;
+    if (!ns) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+
     const fetchData = () => {
       api.getNamespacePods(ns)
-        .then(setPods)
+        .then((data) => {
+          setPods(data);
+          setError(null);
+        })
+        .catch((e) => {
+          setError(e.message);
+        })
         .finally(() => setLoading(false));
     };
+
     fetchData();
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, [ns]);
 
+  if (!ns) {
+    return (
+      <Page>
+        <PageSection>
+          <EmptyState>
+            <EmptyStateBody>No namespace specified in URL.</EmptyStateBody>
+          </EmptyState>
+        </PageSection>
+      </Page>
+    );
+  }
+
   if (loading) {
-    return <Page><PageSection><Spinner /></PageSection></Page>;
+    return <Page><PageSection><Spinner aria-label="Loading pods" /></PageSection></Page>;
+  }
+
+  if (error) {
+    return (
+      <Page>
+        <PageSection>
+          <EmptyState>
+            <Title headingLevel="h2" size="lg">Error loading pods</Title>
+            <EmptyStateBody>{error}</EmptyStateBody>
+          </EmptyState>
+        </PageSection>
+      </Page>
+    );
   }
 
   const totalWatts = pods.reduce((sum, p) => sum + p.total_watts, 0);
@@ -85,11 +151,7 @@ const NamespaceView: React.FC = () => {
             </Thead>
             <Tbody>
               {pods.map((pod) => (
-                <Tr
-                  key={pod.pod_uid}
-                  isClickable
-                  onRowClick={() => history.push(`/power-management/pods/${pod.pod_uid}`)}
-                >
+                <Tr key={pod.pod_uid}>
                   <Td>{pod.pod_name}</Td>
                   <Td>{pod.node_name}</Td>
                   <Td>{formatWatts(pod.total_watts)}</Td>
