@@ -239,29 +239,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.0
         };
 
-        // Always use /proc for full pod list + RSS (memory attribution).
-        // When eBPF is available, override CPU time with per-core data
-        // from sched_switch (nanosecond precision, per-core granularity).
-        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks);
+        // Attribution uses /proc/[pid]/stat CPU time deltas and RSS.
+        // eBPF sched_switch data is collected for future per-core frequency
+        // weighting but not used for power distribution yet — /proc CPU time
+        // deltas are more stable for attribution because they measure actual
+        // user+kernel time, while eBPF context switch counts can over-weight
+        // processes with high scheduling frequency (goroutines, event loops).
+        let pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks);
 
+        // Drain eBPF maps to prevent unbounded growth (data collected for future use)
         if let Some(ref mut obs) = ebpf_observer {
-            if let Ok(snapshot) = obs.drain() {
-                // Build per-pod CPU time from eBPF (more accurate than /proc)
-                let ebpf_pods = enumerate_pods_ebpf(&node_name, cpu_uw, mem_uw, &pod_cache, &snapshot);
-
-                // Override CPU attribution for pods that eBPF saw (active pods)
-                if !ebpf_pods.is_empty() {
-                    let ebpf_map: HashMap<String, &PodPowerReport> =
-                        ebpf_pods.iter().map(|p| (p.pod_uid.clone(), p)).collect();
-
-                    for pod in &mut pods {
-                        if let Some(ebpf_pod) = ebpf_map.get(&pod.pod_uid) {
-                            pod.cpu_uw = ebpf_pod.cpu_uw;
-                            pod.total_uw = pod.cpu_uw + pod.memory_uw;
-                        }
-                    }
-                }
-            }
+            let _ = obs.drain();
         }
 
         // Periodically clean up stale PIDs from the cache
@@ -564,8 +552,12 @@ fn enumerate_pods(
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
 ) -> Vec<PodPowerReport> {
-    // Phase 1: Scan /proc and collect per-process metrics
+    // Phase 1: Scan ALL processes for CPU time (pod and non-pod)
+    // We need total CPU time across ALL processes for proper normalization.
+    // A pod using 10% of total node CPU should get 10% of power, not 90%.
     let mut process_metrics: Vec<ProcessMetrics> = Vec::new();
+    let mut total_all_cpu_ticks: u64 = 0; // ALL processes, not just pods
+    let mut total_all_rss: u64 = 0;
 
     let proc_entries = match fs::read_dir(procfs_root()) {
         Ok(entries) => entries,
@@ -578,6 +570,24 @@ fn enumerate_pods(
             continue;
         }
 
+        // Read CPU time for ALL processes
+        let current_ticks = match read_cpu_ticks(&pid_str) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let pid: u32 = pid_str.parse().unwrap_or(0);
+        let prev = prev_cpu_ticks.get(&pid).copied().unwrap_or(current_ticks);
+        let cpu_delta = current_ticks.saturating_sub(prev);
+        prev_cpu_ticks.insert(pid, current_ticks);
+
+        // Count toward total (all processes)
+        total_all_cpu_ticks += cpu_delta;
+
+        // Read RSS
+        let rss = read_rss_pages(&pid_str).unwrap_or(0);
+        total_all_rss += rss;
+
         // Check if this process belongs to a pod
         let cgroup_path = format!("{}/{}/cgroup", procfs_root(), pid_str);
         let cgroup_content = match fs::read_to_string(&cgroup_path) {
@@ -585,31 +595,13 @@ fn enumerate_pods(
             Err(_) => continue,
         };
 
-        let pod_uid = match extract_pod_uid(&cgroup_content) {
-            Some(uid) => uid,
-            None => continue,
-        };
-
-        // Read CPU time
-        let current_ticks = match read_cpu_ticks(&pid_str) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        // Compute CPU time delta since last read
-        let pid: u32 = pid_str.parse().unwrap_or(0);
-        let prev = prev_cpu_ticks.get(&pid).copied().unwrap_or(current_ticks);
-        let cpu_delta = current_ticks.saturating_sub(prev);
-        prev_cpu_ticks.insert(pid, current_ticks);
-
-        // Read RSS
-        let rss = read_rss_pages(&pid_str).unwrap_or(0);
-
-        process_metrics.push(ProcessMetrics {
-            pod_uid,
-            cpu_ticks: cpu_delta,
-            rss_pages: rss,
-        });
+        if let Some(pod_uid) = extract_pod_uid(&cgroup_content) {
+            process_metrics.push(ProcessMetrics {
+                pod_uid,
+                cpu_ticks: cpu_delta,
+                rss_pages: rss,
+            });
+        }
     }
 
     if process_metrics.is_empty() {
@@ -633,9 +625,10 @@ fn enumerate_pods(
         entry.rss_pages += pm.rss_pages;
     }
 
-    // Phase 3: Compute totals for normalization
-    let total_cpu_ticks: u64 = pod_metrics.values().map(|m| m.cpu_ticks).sum();
-    let total_rss: u64 = pod_metrics.values().map(|m| m.rss_pages).sum();
+    // Phase 3: Normalize against ALL processes (not just pods)
+    // This ensures a pod using 10% of total CPU gets 10% of power.
+    let total_cpu_ticks = total_all_cpu_ticks;
+    let total_rss = total_all_rss;
 
     // Phase 4: Attribute power proportionally
     pod_metrics
