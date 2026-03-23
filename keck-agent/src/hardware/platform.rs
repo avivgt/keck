@@ -278,24 +278,28 @@ fn try_telemetry_metric(
         return None;
     }
 
-    // Also try to read from corresponding sensor (Dell often mirrors to Sensors)
+    // Try to read from corresponding sensor (Dell often mirrors to Sensors)
     let sensor_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", endpoint, metric_id);
-    let method = if probe_reading(client, &sensor_url, username, password).is_some() {
-        ReadMethod::SensorReading { path: format!("/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", metric_id) }
-    } else {
-        ReadMethod::TelemetryMetric { metric_id: metric_id.to_string() }
-    };
+    if let Some(_reading) = probe_reading(client, &sensor_url, username, password) {
+        // Sensor exists and returns a numeric reading — use it
+        return Some(RedfishSource {
+            id: SourceId(format!("redfish:{}:{}", metric_id, endpoint)),
+            display_name: format!("{} ({})", display_prefix, endpoint),
+            component,
+            read_method: ReadMethod::SensorReading {
+                path: format!("/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", metric_id),
+            },
+            endpoint: endpoint.to_string(),
+            username: username.to_string(),
+            password: password.to_string(),
+            client: client.clone(),
+        });
+    }
 
-    Some(RedfishSource {
-        id: SourceId(format!("redfish:{}:{}", metric_id, endpoint)),
-        display_name: format!("{} ({})", display_prefix, endpoint),
-        component,
-        read_method: method,
-        endpoint: endpoint.to_string(),
-        username: username.to_string(),
-        password: password.to_string(),
-        client: client.clone(),
-    })
+    // MetricDefinition exists but no readable sensor — skip
+    // (definition without data is not useful)
+    log::debug!("  {} MetricDefinition exists but no sensor reading available", metric_id);
+    None
 }
 
 /// Try to create a source from Sensors API percentage reading.
