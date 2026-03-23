@@ -367,8 +367,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let selected = match comp.as_str() {
                 "cpu" => cpu_source == name,
                 "memory" => mem_source == name,
+                "gpu" => gpu_uw > 0 && *available,
+                "platform" => platform_uw.is_some() && *available,
                 _ => false,
-            } || (comp == "platform" && platform_uw.is_some() && *available);
+            };
             SourceStatus {
                 name: name.clone(),
                 node_name: node_name.clone(),
