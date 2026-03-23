@@ -178,6 +178,70 @@ const PowerManagementPage: React.FC = () => {
           </GalleryItem>
         </Gallery>
       </PageSection>
+
+      {/* Data Quality & Alerts */}
+      {(data as any).data_quality && (
+        <PageSection>
+          <Card>
+            <CardTitle>Data Quality</CardTitle>
+            <CardBody>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Component</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Source</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Type</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {["cpu", "memory", "gpu", "platform"].map((comp) => {
+                    const q = (data as any).data_quality[comp];
+                    if (!q) return null;
+                    return (
+                      <tr key={comp} style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                        <td style={{ padding: "8px", textTransform: "capitalize" }}>{comp}</td>
+                        <td style={{ padding: "8px" }}>{q.source}</td>
+                        <td style={{ padding: "8px" }}>
+                          <Label color={q.type === "measured" ? "green" : q.type === "estimated" ? "gold" : "red"}>
+                            {q.type}
+                          </Label>
+                        </td>
+                        <td style={{ padding: "8px", fontSize: "0.9em", color: "var(--pf-v6-global--Color--200)" }}>
+                          {q.note}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr>
+                    <td style={{ padding: "8px" }}>Attribution</td>
+                    <td style={{ padding: "8px" }}>{(data as any).data_quality.attribution?.method}</td>
+                    <td style={{ padding: "8px" }}>
+                      <Label color="blue">active</Label>
+                    </td>
+                    <td style={{ padding: "8px", fontSize: "0.9em", color: "var(--pf-v6-global--Color--200)" }}>
+                      {(data as any).data_quality.attribution?.note}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              {(data as any).data_quality.alerts?.missing_ground_truth && (
+                <div style={{
+                  marginTop: 16,
+                  padding: "12px 16px",
+                  background: "var(--pf-v6-global--warning-color--100, #f0ab00)",
+                  color: "#000",
+                  borderRadius: 4,
+                  fontSize: "0.9em"
+                }}>
+                  <strong>Warning:</strong> {(data as any).data_quality.alerts.message}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+        </PageSection>
+      )}
     </Page>
   );
 };

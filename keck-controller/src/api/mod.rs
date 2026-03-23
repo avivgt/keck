@@ -84,6 +84,9 @@ async fn handle_cluster(
     let agg = aggregator.read().await;
     let power = agg.cluster_power();
 
+    let has_platform = power.platform_uw > 0;
+    let has_gpu = power.gpu_uw > 0;
+
     Json(serde_json::json!({
         "cpu_watts": power.cpu_uw as f64 / 1e6,
         "memory_watts": power.memory_uw as f64 / 1e6,
@@ -94,6 +97,49 @@ async fn handle_cluster(
         "node_count": power.node_count,
         "pod_count": power.pod_count,
         "avg_error_ratio": power.avg_error_ratio,
+        "data_quality": {
+            "cpu": {
+                "source": "RAPL",
+                "type": "estimated",
+                "available": true,
+                "note": "Intel RAPL firmware power model (not direct measurement)"
+            },
+            "memory": {
+                "source": "RAPL DRAM",
+                "type": "estimated",
+                "available": power.memory_uw > 0,
+                "note": "Intel RAPL DRAM domain"
+            },
+            "gpu": {
+                "source": if has_gpu { "NVML" } else { "none" },
+                "type": if has_gpu { "measured" } else { "unavailable" },
+                "available": has_gpu,
+                "note": if has_gpu { "GPU on-board shunt resistor" } else { "No GPU power source detected" }
+            },
+            "platform": {
+                "source": if has_platform { "IPMI/Redfish" } else { "none" },
+                "type": if has_platform { "measured" } else { "unavailable" },
+                "available": has_platform,
+                "note": if has_platform {
+                    "PSU measured power (ground truth)"
+                } else {
+                    "No PSU power source — cannot validate accuracy. Configure IPMI or Redfish for ground truth."
+                }
+            },
+            "attribution": {
+                "method": "ebpf+proc",
+                "note": "CPU: eBPF sched_switch per-core time. Memory: RSS proportional. Active pods use eBPF, idle pods use /proc."
+            },
+            "alerts": {
+                "missing_ground_truth": !has_platform,
+                "missing_gpu": !has_gpu,
+                "message": if !has_platform {
+                    "No platform power source (IPMI/Redfish). RAPL estimates cannot be validated. Configure iDRAC IP or enable IPMI to get measured power."
+                } else {
+                    "All data sources available."
+                }
+            }
+        }
     }))
 }
 
