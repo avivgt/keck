@@ -110,15 +110,17 @@ const PowerManagementPage: React.FC = () => {
                     innerRadius={80}
                     titleComponent={
                       React.createElement("text", {
-                        x: 175, y: 130,
+                        x: "50%", y: "42%",
                         textAnchor: "middle",
+                        dominantBaseline: "central",
                         style: { fill: "#e4e4e7", fontSize: 22, fontWeight: 700 }
                       }, data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts))
                     }
                     subTitleComponent={
                       React.createElement("text", {
-                        x: 175, y: 155,
+                        x: "50%", y: "52%",
                         textAnchor: "middle",
+                        dominantBaseline: "central",
                         style: { fill: "#a1a1aa", fontSize: 13 }
                       }, data.platform_watts > 0 ? "PSU Measured" : "Estimated")
                     }
