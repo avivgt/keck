@@ -11,8 +11,6 @@ import {
   Card,
   CardTitle,
   CardBody,
-  Gallery,
-  GalleryItem,
   Label,
   Flex,
   FlexItem,
@@ -22,13 +20,11 @@ import {
 } from "@patternfly/react-core";
 import {
   BoltIcon,
-  LeafIcon,
-  MoneyBillIcon,
   ServerIcon,
-  CubesIcon,
 } from "@patternfly/react-icons";
+import { ChartDonut } from "@patternfly/react-charts";
 import { api, ClusterPower } from "../utils/api";
-import { formatWatts, formatCarbon, formatCost, formatErrorRatio, errorStatus } from "../utils/format";
+import { formatWatts, formatErrorRatio, errorStatus } from "../utils/format";
 
 const PowerManagementPage: React.FC = () => {
   const [data, setData] = React.useState<ClusterPower | null>(null);
@@ -86,100 +82,101 @@ const PowerManagementPage: React.FC = () => {
       </PageSection>
 
       <PageSection>
-        <Gallery hasGutter minWidths={{ default: "250px" }}>
-          {/* Cluster Total */}
-          <GalleryItem>
-            <Card isCompact>
+        <Flex>
+          {/* Pie Chart */}
+          <FlexItem style={{ flex: "0 0 350px" }}>
+            <Card>
               <CardTitle>
                 <Flex>
                   <FlexItem><BoltIcon /></FlexItem>
-                  <FlexItem>Cluster Total</FlexItem>
+                  <FlexItem>Cluster Power Breakdown</FlexItem>
                 </Flex>
               </CardTitle>
               <CardBody>
-                <div style={{ fontSize: "2em", fontWeight: 600 }}>
-                  {data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts)}
-                </div>
-                <div style={{ marginTop: 4, fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
-                  {data.platform_watts > 0 ? "Measured at PSU" : "Estimated (no PSU data)"}
-                </div>
-              </CardBody>
-            </Card>
-          </GalleryItem>
-
-          {/* CPU Power */}
-          <GalleryItem>
-            <Card isCompact>
-              <CardTitle>CPU</CardTitle>
-              <CardBody>
-                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#0066cc" }}>
-                  {formatWatts(data.cpu_watts)}
+                <div style={{ height: 275 }}>
+                  <ChartDonut
+                    constrainToVisibleArea
+                    data={[
+                      { x: "CPU", y: data.cpu_watts },
+                      { x: "Memory", y: data.memory_watts },
+                      { x: "GPU", y: data.gpu_watts },
+                      { x: "Idle/Other", y: data.idle_watts },
+                    ].filter(d => d.y > 0)}
+                    labels={({ datum }) => `${datum.x}: ${formatWatts(datum.y)}`}
+                    colorScale={["#0066cc", "#6753ac", "#3e8635", "#8a8d90"]}
+                    title={data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts)}
+                    subTitle={data.platform_watts > 0 ? "PSU Measured" : "Estimated"}
+                    padding={{ bottom: 20, left: 20, right: 20, top: 20 }}
+                  />
                 </div>
               </CardBody>
             </Card>
-          </GalleryItem>
+          </FlexItem>
 
-          {/* Memory Power */}
-          <GalleryItem>
-            <Card isCompact>
-              <CardTitle>Memory</CardTitle>
-              <CardBody>
-                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#6753ac" }}>
-                  {formatWatts(data.memory_watts)}
-                </div>
-              </CardBody>
-            </Card>
-          </GalleryItem>
-
-          {/* GPU Power */}
-          <GalleryItem>
-            <Card isCompact>
-              <CardTitle>GPU</CardTitle>
-              <CardBody>
-                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#3e8635" }}>
-                  {formatWatts(data.gpu_watts)}
-                </div>
-              </CardBody>
-            </Card>
-          </GalleryItem>
-
-          {/* Idle */}
-          <GalleryItem>
-            <Card isCompact>
-              <CardTitle>Idle</CardTitle>
-              <CardBody>
-                <div style={{ fontSize: "1.8em", fontWeight: 600, color: "#8a8d90" }}>
-                  {formatWatts(data.idle_watts)}
-                </div>
-              </CardBody>
-            </Card>
-          </GalleryItem>
-
-          {/* Infrastructure */}
-          <GalleryItem>
-            <Card isCompact>
+          {/* Summary Stats */}
+          <FlexItem style={{ flex: 1 }}>
+            <Card>
               <CardTitle>
                 <Flex>
                   <FlexItem><ServerIcon /></FlexItem>
-                  <FlexItem>Infrastructure</FlexItem>
+                  <FlexItem>Cluster Summary</FlexItem>
                 </Flex>
               </CardTitle>
               <CardBody>
-                <div>{data.node_count} nodes</div>
-                <div>{data.pod_count} pods</div>
-                <div style={{ marginTop: 8 }}>
-                  RAPL Accuracy:{" "}
-                  <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "gold" : "red"}>
-                    {formatErrorRatio(data.avg_error_ratio)}
-                  </Label>
-                </div>
-                <div style={{ fontSize: "0.75em", color: "var(--pf-v6-global--Color--200)", marginTop: 2 }}>
-                  RAPL coverage vs PSU measured
-                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <tbody>
+                    <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                      <td style={{ padding: "10px 8px", fontWeight: 600 }}>Cluster Total</td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", fontSize: "1.3em", fontWeight: 700 }}>
+                        {data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts)}
+                      </td>
+                      <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
+                        {data.platform_watts > 0 ? "PSU measured" : "estimated"}
+                      </td>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                      <td style={{ padding: "10px 8px", color: "#0066cc" }}>CPU</td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts(data.cpu_watts)}</td>
+                      <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
+                        {data.platform_watts > 0 ? `${((data.cpu_watts / data.platform_watts) * 100).toFixed(0)}%` : ""}
+                      </td>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                      <td style={{ padding: "10px 8px", color: "#6753ac" }}>Memory</td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts(data.memory_watts)}</td>
+                      <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
+                        {data.platform_watts > 0 ? `${((data.memory_watts / data.platform_watts) * 100).toFixed(0)}%` : ""}
+                      </td>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                      <td style={{ padding: "10px 8px", color: "#3e8635" }}>GPU</td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts(data.gpu_watts)}</td>
+                      <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
+                        {data.platform_watts > 0 ? `${((data.gpu_watts / data.platform_watts) * 100).toFixed(0)}%` : ""}
+                      </td>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                      <td style={{ padding: "10px 8px", color: "#8a8d90" }}>Idle / Other</td>
+                      <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts(data.idle_watts)}</td>
+                      <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
+                        {data.platform_watts > 0 ? `${((data.idle_watts / data.platform_watts) * 100).toFixed(0)}%` : ""}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={{ padding: "10px 8px" }}>Infrastructure</td>
+                      <td style={{ padding: "10px 8px", textAlign: "right" }}>{data.node_count} nodes, {data.pod_count} pods</td>
+                      <td style={{ padding: "10px 8px" }}>
+                        <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "gold" : "red"}>
+                          RAPL {formatErrorRatio(data.avg_error_ratio)}
+                        </Label>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </CardBody>
             </Card>
-          </GalleryItem>
-        </Gallery>
+          </FlexItem>
+        </Flex>
       </PageSection>
 
       {/* Data Sources */}
