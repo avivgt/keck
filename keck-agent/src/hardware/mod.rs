@@ -2,7 +2,7 @@
 
 //! Layer 0: Hardware signal collection.
 
-mod gpu;
+pub mod gpu;
 mod hwmon;
 mod platform;
 mod rapl;

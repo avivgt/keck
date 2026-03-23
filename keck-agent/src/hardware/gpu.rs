@@ -195,6 +195,11 @@ pub fn discover() -> Result<Vec<DcgmGpuSource>, SourceError> {
     Ok(sources)
 }
 
+/// Auto-discover DCGM exporter pod IP on this node via K8s API (public).
+pub fn discover_dcgm_url_pub() -> Option<String> {
+    discover_dcgm_url()
+}
+
 /// Auto-discover DCGM exporter pod IP on this node via K8s API.
 fn discover_dcgm_url() -> Option<String> {
     let token = std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token").ok()?;

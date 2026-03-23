@@ -348,7 +348,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // deltas are more stable for attribution because they measure actual
         // user+kernel time, while eBPF context switch counts can over-weight
         // processes with high scheduling frequency (goroutines, event loops).
-        let pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks);
+        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks);
+
+        // Add per-pod GPU power from DCGM exporter metrics
+        if gpu_uw > 0 {
+            add_gpu_power_to_pods(&node_name, &mut pods);
+        }
 
         // Drain eBPF maps to prevent unbounded growth (data collected for future use)
         if let Some(ref mut obs) = ebpf_observer {
@@ -857,6 +862,89 @@ fn count_processes() -> u32 {
                 .count() as u32
         })
         .unwrap_or(0)
+}
+
+/// Add per-pod GPU power from DCGM exporter metrics.
+///
+/// DCGM metrics include pod name and namespace directly:
+///   DCGM_FI_DEV_POWER_USAGE{...,namespace="ai-onboard",pod="llama-predictor-xxx",...} 49.157
+fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>) {
+    let dcgm_url = if let Ok(url) = std::env::var("DCGM_EXPORTER_URL") {
+        if url.contains(".svc") {
+            hardware::gpu::discover_dcgm_url_pub().unwrap_or(url)
+        } else {
+            url
+        }
+    } else {
+        match hardware::gpu::discover_dcgm_url_pub() {
+            Some(url) => url,
+            None => return,
+        }
+    };
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let body = match client.get(&dcgm_url).send().and_then(|r| r.text()) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    for line in body.lines() {
+        if !line.starts_with("DCGM_FI_DEV_POWER_USAGE{") {
+            continue;
+        }
+
+        // Filter by this node's hostname
+        if let Some(h) = extract_dcgm_label(line, "Hostname") {
+            if h != node_name { continue; }
+        }
+
+        let pod_name = match extract_dcgm_label(line, "pod") {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
+        let namespace = extract_dcgm_label(line, "namespace").unwrap_or_default();
+
+        let watts: f64 = line.rsplit_once(' ')
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0.0);
+        if watts <= 0.0 { continue; }
+
+        let gpu_uw = (watts * 1_000_000.0) as u64;
+
+        // Find matching pod and add GPU power
+        if let Some(pod) = pods.iter_mut().find(|p| p.pod_name == pod_name && p.namespace == namespace) {
+            pod.gpu_uw += gpu_uw;
+            pod.total_uw = pod.cpu_uw + pod.memory_uw + pod.gpu_uw;
+        } else {
+            // Pod not in cgroup scan — add as GPU-only entry
+            pods.push(PodPowerReport {
+                node_name: node_name.to_string(),
+                pod_uid: pod_name.clone(),
+                pod_name,
+                namespace,
+                cpu_uw: 0,
+                memory_uw: 0,
+                gpu_uw: gpu_uw,
+                total_uw: gpu_uw,
+                timestamp: SystemTime::now(),
+            });
+        }
+    }
+}
+
+/// Extract a label from a Prometheus DCGM metric line.
+fn extract_dcgm_label(line: &str, label: &str) -> Option<String> {
+    let pattern = format!("{}=\"", label);
+    let start = line.find(&pattern)? + pattern.len();
+    let end = start + line[start..].find('"')?;
+    Some(line[start..end].to_string())
 }
 
 /// Extract pod UID from cgroup v2 content.
