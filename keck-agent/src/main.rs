@@ -831,14 +831,13 @@ fn enumerate_pods(
 
     // Phase 4: Attribute power proportionally
     //
-    // Memory power model: 60% static (PSS) + 40% dynamic (page faults)
-    //   Static: proportional to PSS — holding memory in DIMMs costs power
-    //   Dynamic: proportional to page fault rate — active access costs more
-    //
-    // If page fault data is zero (first interval), fall back to 100% PSS.
-    let pss_weight = if total_pgfaults > 0 { 0.6 } else { 1.0 };
-    let pgfault_weight = if total_pgfaults > 0 { 0.4 } else { 0.0 };
-
+    // Memory power: 100% PSS (Proportional Set Size)
+    //   PSS correctly splits shared pages among all users.
+    //   DRAM power is dominated by refresh (proportional to capacity held),
+    //   not by access pattern.
+    //   Dynamic DRAM access power would require LLC miss counters from
+    //   hardware performance counters, which we collect via eBPF but
+    //   don't use for attribution yet.
     pod_metrics
         .iter()
         .map(|(pod_uid, metrics)| {
@@ -850,19 +849,13 @@ fn enumerate_pods(
             };
             let pod_cpu_uw = (total_cpu_uw as f64 * cpu_ratio) as u64;
 
-            // Memory power: weighted PSS (static) + page faults (dynamic)
+            // Memory power proportional to PSS
             let pss_ratio = if total_pss > 0 {
                 metrics.pss_kb as f64 / total_pss as f64
             } else {
                 0.0
             };
-            let pgfault_ratio = if total_pgfaults > 0 {
-                metrics.pgfaults as f64 / total_pgfaults as f64
-            } else {
-                0.0
-            };
-            let mem_ratio = pss_weight * pss_ratio + pgfault_weight * pgfault_ratio;
-            let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
+            let pod_mem_uw = (total_mem_uw as f64 * pss_ratio) as u64;
 
             // Resolve pod name and namespace
             let (pod_name, namespace) = match pod_cache.get(pod_uid) {
