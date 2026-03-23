@@ -21,6 +21,7 @@ import {
   Tr,
   Th,
   Td,
+  ThProps,
 } from "@patternfly/react-table";
 import { api, PodPower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
@@ -39,10 +40,14 @@ function getNamespaceFromURL(): string {
   return "";
 }
 
+type PodSortKey = "pod_name" | "node_name" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts";
+
 const NamespaceView: React.FC = () => {
   const [ns, setNs] = React.useState(() => getNamespaceFromURL());
   const [pods, setPods] = React.useState<PodPower[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [sortBy, setSortBy] = React.useState<PodSortKey>("total_watts");
+  const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [error, setError] = React.useState<string | null>(null);
 
   // Update ns if URL changes
@@ -137,32 +142,46 @@ const NamespaceView: React.FC = () => {
       </PageSection>
 
       <PageSection>
-        {pods.length > 0 ? (
-          <Table aria-label="Pod power table" variant="compact">
-            <Thead>
-              <Tr>
-                <Th>Pod</Th>
-                <Th>Node</Th>
-                <Th>Total</Th>
-                <Th>CPU</Th>
-                <Th>Memory</Th>
-                <Th>GPU</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
-              {pods.map((pod) => (
-                <Tr key={pod.pod_uid}>
-                  <Td>{pod.pod_name}</Td>
-                  <Td>{pod.node_name}</Td>
-                  <Td>{formatWatts(pod.total_watts)}</Td>
-                  <Td>{formatWatts(pod.cpu_watts)}</Td>
-                  <Td>{formatWatts(pod.memory_watts)}</Td>
-                  <Td>{formatWatts(pod.gpu_watts)}</Td>
+        {pods.length > 0 ? (() => {
+          const cols: PodSortKey[] = ["pod_name", "node_name", "total_watts", "cpu_watts", "memory_watts", "gpu_watts"];
+          const sorted = [...pods].sort((a, b) => {
+            const av = (a as any)[sortBy];
+            const bv = (b as any)[sortBy];
+            if (typeof av === "string") return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+            return sortDir === "asc" ? av - bv : bv - av;
+          });
+          const getSortParams = (key: PodSortKey): ThProps["sort"] => ({
+            sortBy: { index: cols.indexOf(sortBy), direction: sortDir },
+            onSort: (_e, _idx, dir) => { setSortBy(key); setSortDir(dir as "asc" | "desc"); },
+            columnIndex: cols.indexOf(key),
+          });
+          return (
+            <Table aria-label="Pod power table" variant="compact">
+              <Thead>
+                <Tr>
+                  <Th sort={getSortParams("pod_name")}>Pod</Th>
+                  <Th sort={getSortParams("node_name")}>Node</Th>
+                  <Th sort={getSortParams("total_watts")}>Total</Th>
+                  <Th sort={getSortParams("cpu_watts")}>CPU</Th>
+                  <Th sort={getSortParams("memory_watts")}>Memory</Th>
+                  <Th sort={getSortParams("gpu_watts")}>GPU</Th>
                 </Tr>
-              ))}
-            </Tbody>
-          </Table>
-        ) : (
+              </Thead>
+              <Tbody>
+                {sorted.map((pod) => (
+                  <Tr key={pod.pod_uid}>
+                    <Td>{pod.pod_name}</Td>
+                    <Td>{pod.node_name}</Td>
+                    <Td>{formatWatts(pod.total_watts)}</Td>
+                    <Td>{formatWatts(pod.cpu_watts)}</Td>
+                    <Td>{formatWatts(pod.memory_watts)}</Td>
+                    <Td>{formatWatts(pod.gpu_watts)}</Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          );
+        })() : (
           <EmptyState>
             <EmptyStateBody>No pods found in namespace {ns}.</EmptyStateBody>
           </EmptyState>
