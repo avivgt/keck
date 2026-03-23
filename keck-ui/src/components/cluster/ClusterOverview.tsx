@@ -101,15 +101,24 @@ const ClusterOverview: React.FC = () => {
                 <br />Formula: pod CPU power = node CPU power × (pod CPU time delta / total CPU time delta across all processes).
               </p>
 
-              <p style={{ marginTop: 12 }}><strong>4. Per-process memory attribution (PSS)</strong></p>
+              <p style={{ marginTop: 12 }}><strong>4. Per-process memory attribution (PSS + LLC misses)</strong></p>
               <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-                The agent reads PSS (Proportional Set Size) from <code>/proc/[pid]/smaps_rollup</code>.
+                DRAM power has two components, and the agent measures both:
+                <br /><br />
+                <strong>Static (60%)</strong>: PSS (Proportional Set Size) from <code>/proc/[pid]/smaps_rollup</code>.
                 Unlike RSS, PSS splits shared memory pages (libc, etc.) proportionally among all
                 processes using them, eliminating double-counting.
-                DRAM power is dominated by refresh (proportional to memory capacity held),
-                so PSS is the correct metric.
-                Falls back to RSS if smaps_rollup is unavailable.
-                <br />Formula: pod memory power = node memory power × (pod PSS / total PSS across all processes).
+                This captures DRAM refresh power — proportional to how much memory a pod holds.
+                <br /><br />
+                <strong>Dynamic (40%)</strong>: LLC (Last Level Cache) miss counters from hardware
+                performance counters via <code>perf_event_open</code>.
+                Every LLC miss = one DRAM read/write = dynamic power cost.
+                Pods actively streaming data through memory (ML inference, in-memory databases)
+                cause more LLC misses and get charged more DRAM power than idle pods holding
+                equivalent memory.
+                <br /><br />
+                When LLC counters are unavailable, falls back to 100% PSS.
+                <br />Formula: pod memory power = node memory power × (0.6 × PSS ratio + 0.4 × LLC miss ratio).
               </p>
 
               <p style={{ marginTop: 12 }}><strong>5. Per-pod GPU attribution (DCGM)</strong></p>
