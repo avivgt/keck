@@ -42,6 +42,12 @@ pub struct NodePowerReport {
     pub pod_count: u32,
     pub process_count: u32,
     pub timestamp: SystemTime,
+    #[serde(default)]
+    pub cpu_source: String,
+    #[serde(default)]
+    pub memory_source: String,
+    #[serde(default)]
+    pub cpu_reading_type: String,
 }
 
 /// Aggregated report from a single agent push.
@@ -320,6 +326,20 @@ impl ClusterAggregator {
     /// Number of active nodes.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Get CPU source info from the first reporting node.
+    pub fn cpu_source_info(&self) -> (String, String) {
+        self.nodes.values().next()
+            .map(|s| (s.report.cpu_source.clone(), s.report.cpu_reading_type.clone()))
+            .unwrap_or(("unknown".into(), "none".into()))
+    }
+
+    /// Get memory source info from the first reporting node.
+    pub fn memory_source_info(&self) -> String {
+        self.nodes.values().next()
+            .map(|s| s.report.memory_source.clone())
+            .unwrap_or("unknown".into())
     }
 
     /// Evict stale pods and nodes that haven't reported recently.

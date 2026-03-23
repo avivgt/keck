@@ -43,6 +43,12 @@ struct NodePowerReport {
     pod_count: u32,
     process_count: u32,
     timestamp: SystemTime,
+    /// Source used for CPU power (e.g., "Redfish CPU" or "RAPL package")
+    cpu_source: String,
+    /// Source used for memory power
+    memory_source: String,
+    /// Reading type: "measured", "estimated", or "none"
+    cpu_reading_type: String,
 }
 
 #[derive(Serialize)]
@@ -173,11 +179,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_pod_refresh = std::time::Instant::now();
         }
 
-        // Read all sources and compute deltas
-        let mut cpu_energy_uj: u64 = 0;
-        let mut mem_energy_uj: u64 = 0;
-        let mut gpu_energy_uj: u64 = 0;
-        let mut platform_energy_uj: Option<u64> = None;
+        // Read all sources and select the best per component.
+        // Priority: Measured (Redfish) > Estimated (RAPL) > Unavailable
+        //
+        // Track per-component: (power_uw, source_name, reading_type)
+        struct ComponentReading {
+            power_uw: u64,
+            source: String,
+            reading_type: hardware::ReadingType,
+        }
+
+        let mut cpu_best: Option<ComponentReading> = None;
+        let mut mem_best: Option<ComponentReading> = None;
+        let mut gpu_best: Option<ComponentReading> = None;
+        let mut platform_reading: Option<ComponentReading> = None;
 
         for source in &sources {
             let reading = match source.read() {
@@ -188,7 +203,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let delta = if let Some(current_energy) = reading.energy_uj {
+            // Convert to power (microwatts)
+            let power_uw = if let Some(current_energy) = reading.energy_uj {
                 let prev = prev_readings
                     .get(&source.id().0)
                     .copied()
@@ -203,28 +219,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 prev_readings.insert(source.id().0.clone(), current_energy);
-                delta
-            } else if let Some(power_uw) = reading.power_uw {
-                (power_uw as u128 * interval.as_nanos() / 1_000_000_000) as u64
+                energy_to_power(delta, interval.as_nanos() as u64)
+            } else if let Some(pw) = reading.power_uw {
+                pw
             } else {
                 0
             };
 
+            if power_uw == 0 {
+                continue;
+            }
+
+            let cr = ComponentReading {
+                power_uw,
+                source: source.name().to_string(),
+                reading_type: reading.reading_type,
+            };
+
+            // Select best source per component: Measured beats Estimated
+            let is_better = |existing: &Option<ComponentReading>, new: &ComponentReading| -> bool {
+                match existing {
+                    None => true,
+                    Some(old) => {
+                        // Measured > Estimated > Derived
+                        let old_rank = match old.reading_type {
+                            hardware::ReadingType::Measured => 3,
+                            hardware::ReadingType::Estimated => 2,
+                            hardware::ReadingType::Derived => 1,
+                        };
+                        let new_rank = match new.reading_type {
+                            hardware::ReadingType::Measured => 3,
+                            hardware::ReadingType::Estimated => 2,
+                            hardware::ReadingType::Derived => 1,
+                        };
+                        new_rank > old_rank
+                    }
+                }
+            };
+
             match source.component() {
-                Component::Cpu => cpu_energy_uj += delta,
-                Component::Memory => mem_energy_uj += delta,
-                Component::Gpu => gpu_energy_uj += delta,
-                Component::Platform => platform_energy_uj = Some(delta),
+                Component::Cpu => {
+                    if is_better(&cpu_best, &cr) { cpu_best = Some(cr); }
+                }
+                Component::Memory => {
+                    if is_better(&mem_best, &cr) { mem_best = Some(cr); }
+                }
+                Component::Gpu => {
+                    if is_better(&gpu_best, &cr) { gpu_best = Some(cr); }
+                }
+                Component::Platform => {
+                    if is_better(&platform_reading, &cr) { platform_reading = Some(cr); }
+                }
                 _ => {}
             }
         }
 
-        // Convert to power
-        let interval_ns = interval.as_nanos() as u64;
-        let cpu_uw = energy_to_power(cpu_energy_uj, interval_ns);
-        let mem_uw = energy_to_power(mem_energy_uj, interval_ns);
-        let gpu_uw = energy_to_power(gpu_energy_uj, interval_ns);
-        let platform_uw = platform_energy_uj.map(|e| energy_to_power(e, interval_ns));
+        // Extract selected values
+        let cpu_uw = cpu_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
+        let mem_uw = mem_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
+        let gpu_uw = gpu_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
+        let platform_uw = platform_reading.as_ref().map(|r| r.power_uw);
+
+        // Log which source was selected per component
+        let cpu_source = cpu_best.as_ref().map(|r| r.source.as_str()).unwrap_or("none");
+        let mem_source = mem_best.as_ref().map(|r| r.source.as_str()).unwrap_or("none");
+        let cpu_type = cpu_best.as_ref().map(|r| match r.reading_type {
+            hardware::ReadingType::Measured => "measured",
+            hardware::ReadingType::Estimated => "estimated",
+            hardware::ReadingType::Derived => "derived",
+        }).unwrap_or("none");
 
         let total = cpu_uw + mem_uw + gpu_uw;
         let idle_uw = platform_uw.map(|p| p.saturating_sub(total)).unwrap_or(0);
@@ -271,6 +334,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pod_count,
                 process_count: count_processes(),
                 timestamp: SystemTime::now(),
+                cpu_source: cpu_source.to_string(),
+                memory_source: mem_source.to_string(),
+                cpu_reading_type: cpu_type.to_string(),
             },
             pods,
         };
@@ -278,14 +344,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match http_client.post(&report_url).json(&report).send().await {
             Ok(resp) if resp.status().is_success() => {
                 info!(
-                    "Reported: cpu={:.1}W mem={:.1}W platform={} pods={} namespaces={}",
+                    "Reported: cpu={:.1}W({}) mem={:.1}W platform={} pods={}",
                     cpu_uw as f64 / 1e6,
+                    cpu_type,
                     mem_uw as f64 / 1e6,
                     platform_uw
                         .map(|p| format!("{:.1}W", p as f64 / 1e6))
                         .unwrap_or("N/A".into()),
                     pod_count,
-                    count_unique_namespaces(&report.node.node_name, &pod_cache),
                 );
             }
             Ok(resp) => warn!("Controller returned {}", resp.status()),

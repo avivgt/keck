@@ -87,6 +87,10 @@ async fn handle_cluster(
     let has_platform = power.platform_uw > 0;
     let has_gpu = power.gpu_uw > 0;
 
+    // Source info from agents
+    let cpu_info = agg.cpu_source_info();
+    let mem_info = agg.memory_source_info();
+
     // Per-node breakdown
     let nodes = agg.node_summaries();
     let nodes_json: Vec<serde_json::Value> = nodes.iter().map(|n| {
@@ -115,42 +119,39 @@ async fn handle_cluster(
         "nodes": nodes_json,
         "data_quality": {
             "cpu": {
-                "source": "RAPL",
-                "type": "estimated",
-                "available": true,
-                "note": "Intel RAPL firmware power model (not direct measurement)"
+                "source": &cpu_info.0,
+                "type": &cpu_info.1,
+                "available": power.cpu_uw > 0,
             },
             "memory": {
-                "source": "RAPL DRAM",
-                "type": "estimated",
+                "source": &mem_info,
+                "type": if mem_info.contains("Redfish") { "measured" } else if power.memory_uw > 0 { "estimated" } else { "unavailable" },
                 "available": power.memory_uw > 0,
-                "note": "Intel RAPL DRAM domain"
             },
             "gpu": {
                 "source": if has_gpu { "NVML" } else { "none" },
                 "type": if has_gpu { "measured" } else { "unavailable" },
                 "available": has_gpu,
-                "note": if has_gpu { "GPU on-board shunt resistor" } else { "No GPU power source detected" }
             },
             "platform": {
-                "source": if has_platform { "IPMI/Redfish" } else { "none" },
+                "source": if has_platform { "Redfish PSU" } else { "none" },
                 "type": if has_platform { "measured" } else { "unavailable" },
                 "available": has_platform,
                 "note": if has_platform {
                     "PSU measured power (ground truth)"
                 } else {
-                    "No PSU power source — cannot validate accuracy. Configure IPMI or Redfish for ground truth."
+                    "No PSU power source — configure Redfish/IPMI for ground truth."
                 }
             },
             "attribution": {
                 "method": "ebpf+proc",
-                "note": "CPU: eBPF sched_switch per-core time. Memory: RSS proportional. Active pods use eBPF, idle pods use /proc."
+                "note": "CPU time per-process + RSS for memory. eBPF sched_switch for active pods."
             },
             "alerts": {
                 "missing_ground_truth": !has_platform,
                 "missing_gpu": !has_gpu,
                 "message": if !has_platform {
-                    "No platform power source (IPMI/Redfish). RAPL estimates cannot be validated. Configure iDRAC IP or enable IPMI to get measured power."
+                    "No platform power source. Configure iDRAC to get measured power."
                 } else {
                     "All data sources available."
                 }
