@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Platform power sources via Redfish.
+//! Platform power sources via Redfish — vendor-agnostic discovery.
 //!
-//! Creates multiple sources from a single iDRAC:
-//! - Platform total (PowerConsumedWatts — PSU level)
-//! - CPU power (SystemBoardCPUUsage % × total)
-//! - Memory power (SystemBoardMEMUsage % × total)
+//! Probes the BMC's Redfish API to discover available power metrics:
 //!
-//! These are MEASURED values from voltage regulators — more accurate than RAPL.
+//! Level 1 (best): TelemetryService MetricDefinitions
+//!   → TotalCPUPower, TotalMemoryPower, TotalFanPower, TotalStoragePower, TotalPciePower
+//!   → Available on Dell iDRAC9+, potentially HP iLO6+
+//!
+//! Level 2: Sensors API with percentage-of-board readings
+//!   → SystemBoardCPUUsage, SystemBoardMEMUsage, SystemBoardIOUsage
+//!   → Available on Dell iDRAC9 (some models)
+//!
+//! Level 3 (always): Power API
+//!   → PowerConsumedWatts (PSU total — all vendors)
+//!
+//! Whatever is not covered by Redfish falls back to RAPL/hwmon.
 
 use std::time::{Duration, Instant};
 
@@ -15,20 +23,28 @@ use super::{
     Component, Granularity, PowerReading, PowerSource, ReadingType, SourceError, SourceId,
 };
 
-/// Redfish sensor source — reads a specific sensor from the BMC.
+/// Redfish power source — reads a specific metric from the BMC.
 pub struct RedfishSource {
     id: SourceId,
     display_name: String,
     component: Component,
     endpoint: String,
-    sensor_path: String,
-    /// For percentage sensors: multiply by board total power
-    is_percentage: bool,
-    /// Path to read board total (for percentage conversion)
-    board_total_path: String,
+    /// How to read this metric
+    read_method: ReadMethod,
     username: String,
     password: String,
     client: reqwest::blocking::Client,
+}
+
+enum ReadMethod {
+    /// Read "Reading" field from a Sensors API endpoint
+    SensorReading { path: String },
+    /// Read a percentage sensor × board total power
+    SensorPercentage { pct_path: String, total_path: String },
+    /// Read PowerConsumedWatts from Power API
+    PowerApi { path: String },
+    /// Read from TelemetryService MetricReports (value in watts directly)
+    TelemetryMetric { metric_id: String },
 }
 
 impl PowerSource for RedfishSource {
@@ -39,16 +55,48 @@ impl PowerSource for RedfishSource {
     fn reading_type(&self) -> ReadingType { ReadingType::Measured }
 
     fn read(&self) -> Result<PowerReading, SourceError> {
-        let watts = if self.is_percentage {
-            // Read percentage sensor and board total, compute watts
-            let pct = self.read_sensor_value(&self.sensor_path)?;
-            let total = self.read_sensor_value(&self.board_total_path)?;
-            total * pct / 100.0
-        } else {
-            self.read_sensor_value(&self.sensor_path)?
+        let watts = match &self.read_method {
+            ReadMethod::SensorReading { path } => {
+                self.read_json_field(&format!("{}{}", self.endpoint, path), "Reading")?
+            }
+            ReadMethod::SensorPercentage { pct_path, total_path } => {
+                let pct = self.read_json_field(&format!("{}{}", self.endpoint, pct_path), "Reading")?;
+                let total = self.read_json_field(&format!("{}{}", self.endpoint, total_path), "Reading")?;
+                total * pct / 100.0
+            }
+            ReadMethod::PowerApi { path } => {
+                let url = format!("{}{}", self.endpoint, path);
+                let resp = self.client.get(&url)
+                    .basic_auth(&self.username, Some(&self.password))
+                    .send()
+                    .map_err(|e| SourceError::Unavailable(format!("Redfish: {}", e)))?;
+                let body: serde_json::Value = resp.json()
+                    .map_err(|e| SourceError::Parse(format!("JSON: {}", e)))?;
+                body.get("PowerControl")
+                    .and_then(|pc| pc.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|ctrl| ctrl.get("PowerConsumedWatts"))
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| SourceError::Parse("PowerConsumedWatts not found".into()))?
+            }
+            ReadMethod::TelemetryMetric { metric_id } => {
+                // Read from MetricReports — the value is the metric reading
+                let url = format!(
+                    "{}/redfish/v1/TelemetryService/MetricDefinitions/{}",
+                    self.endpoint, metric_id
+                );
+                self.read_json_field(&url, "Reading")
+                    .or_else(|_| {
+                        // Some Dell firmware puts the value in a different location
+                        // Try the sensor with same name
+                        let sensor_url = format!(
+                            "{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}",
+                            self.endpoint, metric_id
+                        );
+                        self.read_json_field(&sensor_url, "Reading")
+                    })?
+            }
         };
-
-        let power_uw = (watts * 1_000_000.0) as u64;
 
         Ok(PowerReading {
             source_id: self.id.clone(),
@@ -57,7 +105,7 @@ impl PowerSource for RedfishSource {
             granularity: Granularity::Node,
             reading_type: ReadingType::Measured,
             energy_uj: None,
-            power_uw: Some(power_uw),
+            power_uw: Some((watts * 1_000_000.0) as u64),
             max_energy_uj: 0,
         })
     }
@@ -68,44 +116,47 @@ impl PowerSource for RedfishSource {
 }
 
 impl RedfishSource {
-    fn read_sensor_value(&self, path: &str) -> Result<f64, SourceError> {
-        let url = format!("{}{}", self.endpoint, path);
-        let resp = self.client
-            .get(&url)
+    fn read_json_field(&self, url: &str, field: &str) -> Result<f64, SourceError> {
+        let resp = self.client.get(url)
             .basic_auth(&self.username, Some(&self.password))
             .send()
-            .map_err(|e| SourceError::Unavailable(format!("Redfish request failed: {}", e)))?;
-
+            .map_err(|e| SourceError::Unavailable(format!("Redfish: {}", e)))?;
         if !resp.status().is_success() {
-            return Err(SourceError::Unavailable(format!("Redfish returned {}", resp.status())));
+            return Err(SourceError::Unavailable(format!("HTTP {}", resp.status())));
         }
-
         let body: serde_json::Value = resp.json()
-            .map_err(|e| SourceError::Parse(format!("JSON parse failed: {}", e)))?;
-
-        // Try Reading field (Sensors API)
-        if let Some(v) = body.get("Reading").and_then(|v| v.as_f64()) {
-            return Ok(v);
-        }
-
-        // Try PowerConsumedWatts (Power API)
-        if let Some(v) = body.get("PowerControl")
-            .and_then(|pc| pc.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|ctrl| ctrl.get("PowerConsumedWatts"))
+            .map_err(|e| SourceError::Parse(format!("JSON: {}", e)))?;
+        body.get(field)
             .and_then(|v| v.as_f64())
-        {
-            return Ok(v);
-        }
-
-        Err(SourceError::Parse("No reading found in Redfish response".into()))
+            .ok_or_else(|| SourceError::Parse(format!("Field '{}' not found", field)))
     }
 }
 
-/// Discover Redfish power sources.
+/// Probe a Redfish URL — returns true if it exists and returns 200.
+fn probe(client: &reqwest::blocking::Client, url: &str, user: &str, pass: &str) -> bool {
+    client.get(url)
+        .basic_auth(user, Some(pass))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Probe a Redfish URL and check if a specific field exists with a numeric value.
+fn probe_reading(client: &reqwest::blocking::Client, url: &str, user: &str, pass: &str) -> Option<f64> {
+    let resp = client.get(url).basic_auth(user, Some(pass)).send().ok()?;
+    if !resp.status().is_success() { return None; }
+    let body: serde_json::Value = resp.json().ok()?;
+    body.get("Reading").and_then(|v| v.as_f64())
+}
+
+/// Discover Redfish power sources using vendor-agnostic capability probing.
 ///
-/// Creates sources for platform total, CPU, and memory from iDRAC sensors.
+/// Discovery order (best first):
+/// 1. TelemetryService MetricDefinitions (Dell iDRAC, potentially others)
+/// 2. Sensors API percentage readings (some BMCs)
+/// 3. Power API total (all BMCs)
 pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
+    // Resolve endpoint
     let endpoint = if let Ok(ep) = std::env::var("REDFISH_ENDPOINT") {
         ep
     } else if let Ok(map) = std::env::var("REDFISH_MAP") {
@@ -114,25 +165,18 @@ pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
         let serial = std::fs::read_to_string(&serial_path)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-
         if serial.is_empty() {
-            return Err(SourceError::Unavailable("Cannot read node serial number".into()));
+            return Err(SourceError::Unavailable("Cannot read serial".into()));
         }
-
-        log::info!("Node serial: {}, looking up in REDFISH_MAP", serial);
-
+        log::info!("Node serial: {}", serial);
         match map.split(',').find_map(|entry| {
             let parts: Vec<&str> = entry.splitn(2, '=').collect();
             if parts.len() == 2 && parts[0].trim() == serial {
                 Some(parts[1].trim().to_string())
-            } else {
-                None
-            }
+            } else { None }
         }) {
             Some(ep) => ep,
-            None => return Err(SourceError::Unavailable(
-                format!("Serial {} not found in REDFISH_MAP", serial),
-            )),
+            None => return Err(SourceError::Unavailable(format!("Serial {} not in REDFISH_MAP", serial))),
         }
     } else {
         return Err(SourceError::Unavailable("REDFISH_ENDPOINT or REDFISH_MAP not set".into()));
@@ -145,71 +189,142 @@ pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|e| SourceError::Unavailable(format!("HTTP client error: {}", e)))?;
+        .map_err(|e| SourceError::Unavailable(format!("HTTP client: {}", e)))?;
 
-    // Test connection
-    let test_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Power", endpoint);
-    let resp = client.get(&test_url).basic_auth(&username, Some(&password)).send()
-        .map_err(|e| SourceError::Unavailable(format!("Redfish connection failed: {}", e)))?;
-    if !resp.status().is_success() {
-        return Err(SourceError::Unavailable(format!("Redfish returned {}", resp.status())));
+    // Test basic connectivity
+    let power_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Power", endpoint);
+    if !probe(&client, &power_url, &username, &password) {
+        return Err(SourceError::Unavailable("Redfish not reachable".into()));
     }
 
     log::info!("Redfish connected: {}", endpoint);
 
-    let board_total_path = "/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardPwrConsumption".to_string();
-
     let mut sources: Vec<Box<dyn PowerSource>> = Vec::new();
 
-    // Platform total (PSU power)
+    // Component discovery — for each component, try best method first
+
+    // ─── CPU Power ───────────────────────────────────────────────
+    let cpu_source = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalCPUPower", Component::Cpu, "Redfish Telemetry CPU")
+        .or_else(|| try_sensor_pct(&client, &endpoint, &username, &password, "SystemBoardCPUUsage", Component::Cpu, "Redfish Sensor CPU"))
+        .or_else(|| try_telemetry_metric(&client, &endpoint, &username, &password, "CPUPower", Component::Cpu, "Redfish Telemetry CPUPower"));
+
+    if let Some(src) = cpu_source {
+        log::info!("  CPU: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    } else {
+        log::info!("  CPU: no Redfish source (will use RAPL)");
+    }
+
+    // ─── Memory Power ────────────────────────────────────────────
+    let mem_source = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalMemoryPower", Component::Memory, "Redfish Telemetry Memory")
+        .or_else(|| try_telemetry_metric(&client, &endpoint, &username, &password, "DRAMPwr", Component::Memory, "Redfish Telemetry DRAM"))
+        .or_else(|| try_sensor_pct(&client, &endpoint, &username, &password, "SystemBoardMEMUsage", Component::Memory, "Redfish Sensor Memory"));
+
+    if let Some(src) = mem_source {
+        log::info!("  Memory: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    } else {
+        log::info!("  Memory: no Redfish source (will use RAPL DRAM)");
+    }
+
+    // ─── Fan Power ───────────────────────────────────────────────
+    if let Some(src) = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalFanPower", Component::Fan, "Redfish Telemetry Fans") {
+        log::info!("  Fans: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    }
+
+    // ─── Storage Power ───────────────────────────────────────────
+    if let Some(src) = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalStoragePower", Component::Storage, "Redfish Telemetry Storage") {
+        log::info!("  Storage: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    }
+
+    // ─── PCIe/NIC Power ──────────────────────────────────────────
+    if let Some(src) = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalPciePower", Component::Nic, "Redfish Telemetry PCIe") {
+        log::info!("  PCIe: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    }
+
+    // ─── Platform Total (always) ─────────────────────────────────
     sources.push(Box::new(RedfishSource {
         id: SourceId(format!("redfish:platform:{}", endpoint)),
         display_name: format!("Redfish PSU Total ({})", endpoint),
         component: Component::Platform,
-        sensor_path: "/redfish/v1/Chassis/System.Embedded.1/Power".into(),
-        is_percentage: false,
-        board_total_path: String::new(),
+        read_method: ReadMethod::PowerApi {
+            path: "/redfish/v1/Chassis/System.Embedded.1/Power".into(),
+        },
         endpoint: endpoint.clone(),
         username: username.clone(),
         password: password.clone(),
         client: client.clone(),
     }));
-
-    // CPU power (SystemBoardCPUUsage % × board total) — MEASURED
-    let cpu_sensor = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardCPUUsage", endpoint);
-    if client.get(&cpu_sensor).basic_auth(&username, Some(&password)).send().map(|r| r.status().is_success()).unwrap_or(false) {
-        sources.push(Box::new(RedfishSource {
-            id: SourceId(format!("redfish:cpu:{}", endpoint)),
-            display_name: format!("Redfish CPU ({})", endpoint),
-            component: Component::Cpu,
-            sensor_path: "/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardCPUUsage".into(),
-            is_percentage: true,
-            board_total_path: board_total_path.clone(),
-            endpoint: endpoint.clone(),
-            username: username.clone(),
-            password: password.clone(),
-            client: client.clone(),
-        }));
-        log::info!("  Redfish CPU sensor available (measured)");
-    }
-
-    // Memory power (SystemBoardMEMUsage % × board total) — MEASURED
-    let mem_sensor = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardMEMUsage", endpoint);
-    if client.get(&mem_sensor).basic_auth(&username, Some(&password)).send().map(|r| r.status().is_success()).unwrap_or(false) {
-        sources.push(Box::new(RedfishSource {
-            id: SourceId(format!("redfish:memory:{}", endpoint)),
-            display_name: format!("Redfish Memory ({})", endpoint),
-            component: Component::Memory,
-            sensor_path: "/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardMEMUsage".into(),
-            is_percentage: true,
-            board_total_path: board_total_path.clone(),
-            endpoint: endpoint.clone(),
-            username: username.clone(),
-            password: password.clone(),
-            client: client.clone(),
-        }));
-        log::info!("  Redfish Memory sensor available (measured)");
-    }
+    log::info!("  Platform: PSU total (measured)");
 
     Ok(sources)
+}
+
+/// Try to create a source from TelemetryService MetricDefinitions.
+fn try_telemetry_metric(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    username: &str,
+    password: &str,
+    metric_id: &str,
+    component: Component,
+    display_prefix: &str,
+) -> Option<RedfishSource> {
+    let url = format!("{}/redfish/v1/TelemetryService/MetricDefinitions/{}", endpoint, metric_id);
+    if !probe(client, &url, username, password) {
+        return None;
+    }
+
+    // Also try to read from corresponding sensor (Dell often mirrors to Sensors)
+    let sensor_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", endpoint, metric_id);
+    let method = if probe_reading(client, &sensor_url, username, password).is_some() {
+        ReadMethod::SensorReading { path: format!("/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", metric_id) }
+    } else {
+        ReadMethod::TelemetryMetric { metric_id: metric_id.to_string() }
+    };
+
+    Some(RedfishSource {
+        id: SourceId(format!("redfish:{}:{}", metric_id, endpoint)),
+        display_name: format!("{} ({})", display_prefix, endpoint),
+        component,
+        read_method: method,
+        endpoint: endpoint.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+        client: client.clone(),
+    })
+}
+
+/// Try to create a source from Sensors API percentage reading.
+fn try_sensor_pct(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    username: &str,
+    password: &str,
+    sensor_name: &str,
+    component: Component,
+    display_prefix: &str,
+) -> Option<RedfishSource> {
+    let sensor_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", endpoint, sensor_name);
+    probe_reading(client, &sensor_url, username, password)?;
+
+    let total_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardPwrConsumption", endpoint);
+    probe_reading(client, &total_url, username, password)?;
+
+    Some(RedfishSource {
+        id: SourceId(format!("redfish:{}:{}", sensor_name, endpoint)),
+        display_name: format!("{} ({})", display_prefix, endpoint),
+        component,
+        read_method: ReadMethod::SensorPercentage {
+            pct_path: format!("/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", sensor_name),
+            total_path: "/redfish/v1/Chassis/System.Embedded.1/Sensors/SystemBoardPwrConsumption".into(),
+        },
+        endpoint: endpoint.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+        client: client.clone(),
+    })
 }
