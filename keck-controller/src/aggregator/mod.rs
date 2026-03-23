@@ -48,6 +48,18 @@ pub struct NodePowerReport {
     pub memory_source: String,
     #[serde(default)]
     pub cpu_reading_type: String,
+    #[serde(default)]
+    pub sources: Vec<SourceStatus>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SourceStatus {
+    pub name: String,
+    pub component: String,
+    pub reading_type: String,
+    pub available: bool,
+    pub selected: bool,
+    pub power_uw: u64,
 }
 
 /// Aggregated report from a single agent push.
@@ -340,6 +352,13 @@ impl ClusterAggregator {
         self.nodes.values().next()
             .map(|s| s.report.memory_source.clone())
             .unwrap_or("unknown".into())
+    }
+
+    /// Get all source statuses (merged from all nodes).
+    pub fn all_sources(&self) -> Vec<&SourceStatus> {
+        self.nodes.values()
+            .flat_map(|s| s.report.sources.iter())
+            .collect()
     }
 
     /// Evict stale pods and nodes that haven't reported recently.

@@ -179,6 +179,61 @@ const PowerManagementPage: React.FC = () => {
         </Gallery>
       </PageSection>
 
+      {/* Data Sources */}
+      {(data as any).sources && (data as any).sources.length > 0 && (
+        <PageSection>
+          <Card>
+            <CardTitle>Data Sources</CardTitle>
+            <CardBody>
+              <p style={{ marginBottom: 12, fontSize: "0.9em", color: "var(--pf-v6-global--Color--200)" }}>
+                All discovered power sources. The most accurate available source is automatically
+                selected per component (Measured &gt; Estimated).
+              </p>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Source</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Component</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Type</th>
+                    <th style={{ textAlign: "right", padding: "8px" }}>Reading</th>
+                    <th style={{ textAlign: "center", padding: "8px" }}>Available</th>
+                    <th style={{ textAlign: "center", padding: "8px" }}>Selected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data as any).sources.map((src: any, i: number) => (
+                    <tr key={i} style={{
+                      borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)",
+                      opacity: src.available ? 1 : 0.5,
+                      fontWeight: src.selected ? 600 : 400,
+                    }}>
+                      <td style={{ padding: "8px" }}>{src.name}</td>
+                      <td style={{ padding: "8px", textTransform: "uppercase" }}>
+                        {src.component === "cpu" ? "CPU" : src.component === "gpu" ? "GPU" : src.component.charAt(0).toUpperCase() + src.component.slice(1)}
+                      </td>
+                      <td style={{ padding: "8px" }}>
+                        <Label color={src.reading_type === "measured" ? "green" : src.reading_type === "estimated" ? "gold" : "red"}>
+                          {src.reading_type}
+                        </Label>
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "right" }}>
+                        {src.available ? formatWatts(src.watts) : "—"}
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "center" }}>
+                        {src.available ? "\u2705" : "\u274C"}
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "center" }}>
+                        {src.selected ? "\u2B50" : ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardBody>
+          </Card>
+        </PageSection>
+      )}
+
       {/* Per-Node Breakdown */}
       {(data as any).nodes && (data as any).nodes.length > 0 && (
         <PageSection>
