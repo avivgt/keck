@@ -1,20 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Platform power source: PSU input power via Redfish or IPMI.
+//! Platform power source: PSU input power via Redfish.
 //!
-//! This is the GROUND TRUTH anchor. The PSU input power is the only
-//! number that represents actual electricity consumed by the server.
-//! Everything else (RAPL, hwmon, GPU) is a component measurement that
-//! should sum to less than or equal to the PSU reading.
+//! This is the GROUND TRUTH — actual watts measured at the PSU.
+//! Used to validate RAPL estimates and compute the error ratio.
 //!
-//! Sources:
-//! - Redfish PowerSubsystem API (modern BMCs)
-//! - Redfish Power API (older BMCs, deprecated but common)
-//! - IPMI DCMI power reading (legacy fallback)
-//!
-//! Platform sources are slow (HTTP/IPMI roundtrip: 100ms-2s) and should
-//! be polled on the slow tier (2-5s intervals). They are read at every
-//! heartbeat for reconciliation.
+//! Configuration via environment variables:
+//!   REDFISH_ENDPOINT — iDRAC/BMC URL (e.g., https://192.168.52.172)
+//!   REDFISH_USERNAME — default: root
+//!   REDFISH_PASSWORD — default: calvin
 
 use std::time::{Duration, Instant};
 
@@ -22,66 +16,17 @@ use super::{
     Component, Granularity, PowerReading, PowerSource, ReadingType, SourceError, SourceId,
 };
 
-/// Redfish PSU power source.
+/// Redfish PSU power source — reads real measured watts from the BMC.
 pub struct RedfishSource {
     id: SourceId,
     display_name: String,
     endpoint: String,
-    // TODO: auth credentials, HTTP client
+    username: String,
+    password: String,
+    client: reqwest::blocking::Client,
 }
 
 impl PowerSource for RedfishSource {
-    fn id(&self) -> &SourceId {
-        &self.id
-    }
-
-    fn name(&self) -> &str {
-        &self.display_name
-    }
-
-    fn component(&self) -> Component {
-        Component::Platform
-    }
-
-    fn granularity(&self) -> Granularity {
-        Granularity::Node
-    }
-
-    fn reading_type(&self) -> ReadingType {
-        ReadingType::Measured // PSU shunt = real measurement
-    }
-
-    fn read(&self) -> Result<PowerReading, SourceError> {
-        // TODO: Implement Redfish API call
-        //
-        // Strategy: try PowerSubsystem (modern) first, fall back to Power (legacy)
-        //
-        // Modern: GET /redfish/v1/Chassis/1/PowerSubsystem/PowerSupplies
-        //   → PowerSupplies[].Metrics.InputPowerWatts
-        //
-        // Legacy: GET /redfish/v1/Chassis/1/Power
-        //   → PowerControl[].PowerConsumedWatts
-        //
-        // Convert watts to microwatts for our internal representation.
-
-        Err(SourceError::Unavailable(
-            "Redfish support not yet implemented".into(),
-        ))
-    }
-
-    fn default_poll_interval(&self) -> Duration {
-        // Redfish is an HTTP call to the BMC. 2-5 second intervals are typical.
-        Duration::from_secs(3)
-    }
-}
-
-/// IPMI DCMI power reading (legacy fallback).
-pub struct IpmiSource {
-    id: SourceId,
-    display_name: String,
-}
-
-impl PowerSource for IpmiSource {
     fn id(&self) -> &SourceId {
         &self.id
     }
@@ -103,58 +48,143 @@ impl PowerSource for IpmiSource {
     }
 
     fn read(&self) -> Result<PowerReading, SourceError> {
-        // TODO: Implement IPMI DCMI power reading
-        //
-        // Option A: Parse output of `ipmitool dcmi power reading`
-        //   Instantaneous power reading:    210 Watts
-        //
-        // Option B: Use ipmi-rs crate for direct /dev/ipmi0 access
-        //   (avoids shell-out, lower latency)
-        //
-        // DCMI (Data Center Manageability Interface) provides platform
-        // power readings from the BMC's power monitoring circuitry.
+        let url = format!(
+            "{}/redfish/v1/Chassis/System.Embedded.1/Power",
+            self.endpoint
+        );
 
-        Err(SourceError::Unavailable(
-            "IPMI support not yet implemented".into(),
-        ))
+        let resp = self
+            .client
+            .get(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .map_err(|e| SourceError::Unavailable(format!("Redfish request failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Err(SourceError::Unavailable(format!(
+                "Redfish returned {}",
+                resp.status()
+            )));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .map_err(|e| SourceError::Parse(format!("Redfish JSON parse failed: {}", e)))?;
+
+        // Extract PowerConsumedWatts from PowerControl array
+        let watts = body
+            .get("PowerControl")
+            .and_then(|pc| pc.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|ctrl| ctrl.get("PowerConsumedWatts"))
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| {
+                SourceError::Parse("PowerConsumedWatts not found in Redfish response".into())
+            })?;
+
+        // Convert watts to microwatts
+        let power_uw = (watts * 1_000_000.0) as u64;
+
+        Ok(PowerReading {
+            source_id: self.id.clone(),
+            timestamp: Instant::now(),
+            component: Component::Platform,
+            granularity: Granularity::Node,
+            reading_type: ReadingType::Measured,
+            energy_uj: None,
+            power_uw: Some(power_uw),
+            max_energy_uj: 0,
+        })
     }
 
     fn default_poll_interval(&self) -> Duration {
-        Duration::from_secs(5)
+        Duration::from_secs(3)
     }
 }
 
-/// Discover platform power sources.
+/// Discover Redfish platform power source.
 ///
-/// Tries Redfish first (configured via environment or config file),
-/// then falls back to IPMI DCMI if /dev/ipmi0 exists.
+/// Configured via environment variables:
+///   REDFISH_ENDPOINT — required (e.g., https://192.168.52.172)
+///   REDFISH_USERNAME — optional (default: root)
+///   REDFISH_PASSWORD — optional (default: calvin)
 pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
-    let mut sources: Vec<Box<dyn PowerSource>> = Vec::new();
+    // Option 1: Direct endpoint (for single-server or when set per-node)
+    // Option 2: Serial-to-endpoint mapping for DaemonSet deployments
+    //   REDFISH_MAP="SERIAL1=https://ip1,SERIAL2=https://ip2"
+    let endpoint = if let Ok(ep) = std::env::var("REDFISH_ENDPOINT") {
+        ep
+    } else if let Ok(map) = std::env::var("REDFISH_MAP") {
+        // Read this node's serial number
+        let sysfs = super::sysfs_root();
+        let serial_path = format!("{}/class/dmi/id/product_serial", sysfs);
+        let serial = std::fs::read_to_string(&serial_path)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
 
-    // Try Redfish (from environment or config)
-    if let Ok(endpoint) = std::env::var("REDFISH_ENDPOINT") {
-        log::info!("Redfish endpoint configured: {}", endpoint);
-        sources.push(Box::new(RedfishSource {
-            id: SourceId("redfish:psu:0".into()),
-            display_name: format!("Redfish PSU ({})", endpoint),
-            endpoint,
-        }));
-    }
+        if serial.is_empty() {
+            return Err(SourceError::Unavailable("Cannot read node serial number".into()));
+        }
 
-    // Try IPMI as fallback
-    if std::path::Path::new("/dev/ipmi0").exists() {
-        log::info!("IPMI device found: /dev/ipmi0");
-        sources.push(Box::new(IpmiSource {
-            id: SourceId("ipmi:dcmi:0".into()),
-            display_name: "IPMI DCMI power reading".into(),
-        }));
-    }
+        log::info!("Node serial: {}, looking up in REDFISH_MAP", serial);
 
-    if sources.is_empty() {
+        // Parse "SERIAL1=https://ip1,SERIAL2=https://ip2"
+        match map.split(',').find_map(|entry| {
+            let parts: Vec<&str> = entry.splitn(2, '=').collect();
+            if parts.len() == 2 && parts[0].trim() == serial {
+                Some(parts[1].trim().to_string())
+            } else {
+                None
+            }
+        }) {
+            Some(ep) => ep,
+            None => {
+                return Err(SourceError::Unavailable(
+                    format!("Serial {} not found in REDFISH_MAP", serial),
+                ));
+            }
+        }
+    } else {
         return Err(SourceError::Unavailable(
-            "No platform power source found (no Redfish, no IPMI)".into(),
+            "REDFISH_ENDPOINT or REDFISH_MAP not set".into(),
         ));
+    };
+
+    let username = std::env::var("REDFISH_USERNAME").unwrap_or_else(|_| "root".into());
+    let password = std::env::var("REDFISH_PASSWORD").unwrap_or_else(|_| "calvin".into());
+
+    // Build HTTP client that accepts self-signed certs (iDRAC uses self-signed)
+    let client = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| SourceError::Unavailable(format!("Failed to create HTTP client: {}", e)))?;
+
+    // Test the connection
+    let test_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Power", endpoint);
+    let resp = client
+        .get(&test_url)
+        .basic_auth(&username, Some(&password))
+        .send()
+        .map_err(|e| SourceError::Unavailable(format!("Redfish connection failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        return Err(SourceError::Unavailable(format!(
+            "Redfish returned {} — check credentials",
+            resp.status()
+        )));
     }
 
-    Ok(sources)
+    log::info!("Redfish connected: {} (authenticated as {})", endpoint, username);
+
+    let source = RedfishSource {
+        id: SourceId(format!("redfish:{}", endpoint)),
+        display_name: format!("Redfish PSU ({})", endpoint),
+        endpoint,
+        username,
+        password,
+        client,
+    };
+
+    Ok(vec![Box::new(source)])
 }
