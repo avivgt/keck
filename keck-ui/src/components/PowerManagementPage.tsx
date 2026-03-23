@@ -231,7 +231,10 @@ const PowerManagementPage: React.FC = () => {
                         {src.component === "cpu" ? "CPU" : src.component === "gpu" ? "GPU" : src.component.charAt(0).toUpperCase() + src.component.slice(1)}
                       </td>
                       <td style={{ padding: "8px" }}>
-                        <Label color={src.reading_type === "measured" ? "green" : src.reading_type === "estimated" ? "gold" : "red"}>
+                        <Label
+                          color={src.reading_type === "measured" ? "green" : src.reading_type === "estimated" ? "gold" : "red"}
+                          style={{ fontSize: "12px", fontWeight: 500, minWidth: "75px", textAlign: "center" }}
+                        >
                           {src.reading_type}
                         </Label>
                       </td>
