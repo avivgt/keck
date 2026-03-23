@@ -20,14 +20,19 @@ pub struct LlcMissReader {
 const PERF_TYPE_HARDWARE: u32 = 0;
 const PERF_COUNT_HW_CACHE_MISSES: u64 = 3;
 
-/// Simplified perf_event_attr
+/// Simplified perf_event_attr — zeroed to match kernel expectations.
 #[repr(C)]
-#[derive(Default)]
 struct PerfEventAttr {
     type_: u32,
     size: u32,
     config: u64,
-    _rest: [u8; 104], // padding to match kernel struct size
+    _rest: [u8; 104],
+}
+
+impl PerfEventAttr {
+    fn new() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
 }
 
 impl LlcMissReader {
@@ -87,7 +92,7 @@ impl Drop for LlcMissReader {
 }
 
 fn perf_event_open_llc(cpu: i32) -> Result<RawFd, std::io::Error> {
-    let mut attr = PerfEventAttr::default();
+    let mut attr = PerfEventAttr::new();
     attr.type_ = PERF_TYPE_HARDWARE;
     attr.size = std::mem::size_of::<PerfEventAttr>() as u32;
     attr.config = PERF_COUNT_HW_CACHE_MISSES;
