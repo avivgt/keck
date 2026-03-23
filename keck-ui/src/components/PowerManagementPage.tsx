@@ -168,10 +168,13 @@ const PowerManagementPage: React.FC = () => {
                 <div>{data.node_count} nodes</div>
                 <div>{data.pod_count} pods</div>
                 <div style={{ marginTop: 8 }}>
-                  Accuracy:{" "}
+                  RAPL Accuracy:{" "}
                   <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "gold" : "red"}>
                     {formatErrorRatio(data.avg_error_ratio)}
                   </Label>
+                </div>
+                <div style={{ fontSize: "0.75em", color: "var(--pf-v6-global--Color--200)", marginTop: 2 }}>
+                  RAPL coverage vs PSU measured
                 </div>
               </CardBody>
             </Card>
