@@ -28,8 +28,10 @@ and deploying the agent, controller, and UI.
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────┐      │
 │  │ keck-agent (DaemonSet) — one per node                │      │
-│  │ Privileged, hostPID, /proc + /sys mounts             │      │
-│  │ Reads RAPL, hwmon, GPU sensors                       │      │
+│  │ Privileged, hostPID, /host/proc + /host/sys mounts  │      │
+│  │ Probes: Redfish Telemetry → Sensors → RAPL (auto)   │      │
+│  │ GPU: DCGM exporter (per-pod measured power)         │      │
+│  │ eBPF: sched_switch + cpu_frequency tracepoints      │      │
 │  └──────────────────────────────────────────────────────┘      │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
