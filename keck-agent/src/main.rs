@@ -570,7 +570,23 @@ fn enumerate_pods(
             continue;
         }
 
-        // Read CPU time for ALL processes
+        // Skip threads (LWPs) — only count process leaders.
+        // A thread's TGID (field 4 in /proc/[pid]/status) differs from its PID.
+        // For process leaders, TGID == PID.
+        // /proc/[pid]/stat field 4 (after comm) is PPID, field 1 (before comm) is PID.
+        // Simpler check: if /proc/[pid]/task/[pid]/children doesn't list this as leader,
+        // or check /proc/[pid]/status for Tgid.
+        let tgid_path = format!("{}/{}/status", procfs_root(), pid_str);
+        if let Ok(status) = fs::read_to_string(&tgid_path) {
+            if let Some(tgid_line) = status.lines().find(|l| l.starts_with("Tgid:")) {
+                let tgid = tgid_line.split_whitespace().nth(1).unwrap_or("");
+                if tgid != pid_str {
+                    continue; // This is a thread, skip it
+                }
+            }
+        }
+
+        // Read CPU time for ALL processes (process leaders only)
         let current_ticks = match read_cpu_ticks(&pid_str) {
             Some(t) => t,
             None => continue,
