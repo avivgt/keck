@@ -159,8 +159,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Previous readings for delta computation
     let mut prev_readings: HashMap<String, u64> = HashMap::new();
 
-    // Per-process CPU ticks cache for computing deltas
+    // Per-process caches for computing deltas
     let mut prev_cpu_ticks: HashMap<u32, u64> = HashMap::new();
+    let mut prev_page_faults: HashMap<u32, (u64, u64)> = HashMap::new(); // (minflt, majflt)
     let mut tick_count: u32 = 0;
 
     // Pod metadata cache: uid → (name, namespace)
@@ -348,7 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // deltas are more stable for attribution because they measure actual
         // user+kernel time, while eBPF context switch counts can over-weight
         // processes with high scheduling frequency (goroutines, event loops).
-        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks);
+        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults);
 
         // Add per-pod GPU power from DCGM exporter metrics
         if gpu_uw > 0 {
@@ -363,7 +364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Periodically clean up stale PIDs from the cache
         tick_count += 1;
         if tick_count % 30 == 0 {
-            cleanup_stale_pids(&mut prev_cpu_ticks);
+            cleanup_stale_pids(&mut prev_cpu_ticks, &mut prev_page_faults);
         }
         let pod_count = pods.len() as u32;
 
@@ -624,39 +625,72 @@ struct ProcessMetrics {
     cpu_ticks: u64,
     /// Resident set size in pages
     rss_pages: u64,
+    /// Minor page faults (memory accesses served from page cache)
+    minflt_delta: u64,
+    /// Major page faults (actual disk reads → memory)
+    majflt_delta: u64,
 }
 
-/// Read CPU time (utime + stime) from /proc/[pid]/stat.
+/// Fields parsed from /proc/[pid]/stat.
+struct ProcStat {
+    cpu_ticks: u64,  // utime + stime
+    minflt: u64,     // minor page faults (memory access from page cache)
+    majflt: u64,     // major page faults (disk → memory)
+}
+
+/// Read CPU time and page fault counters from /proc/[pid]/stat.
 ///
-/// Fields in /proc/[pid]/stat (space-separated, 1-indexed):
-///   field 14: utime — user mode CPU time in clock ticks
-///   field 15: stime — kernel mode CPU time in clock ticks
-fn read_cpu_ticks(pid_str: &str) -> Option<u64> {
+/// Fields in /proc/[pid]/stat (after the closing ')'):
+///   index 7:  minflt  — minor page faults
+///   index 9:  majflt  — major page faults
+///   index 11: utime   — user mode CPU time in clock ticks
+///   index 12: stime   — kernel mode CPU time in clock ticks
+fn read_proc_stat(pid_str: &str) -> Option<ProcStat> {
     let stat_path = format!("{}/{}/stat", procfs_root(), pid_str);
     let content = fs::read_to_string(&stat_path).ok()?;
 
-    // The comm field (field 2) can contain spaces and parens, so find
-    // the last ')' to skip past it reliably.
     let after_comm = content.rsplit_once(')')?.1;
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
 
-    // After the closing ')': field index 0 = state (field 3 in stat)
-    // utime is field 14 in stat = index 11 after ')'
-    // stime is field 15 in stat = index 12 after ')'
     if fields.len() < 13 {
         return None;
     }
 
+    let minflt: u64 = fields[7].parse().ok()?;
+    let majflt: u64 = fields[9].parse().ok()?;
     let utime: u64 = fields[11].parse().ok()?;
     let stime: u64 = fields[12].parse().ok()?;
-    Some(utime + stime)
+
+    Some(ProcStat {
+        cpu_ticks: utime + stime,
+        minflt,
+        majflt,
+    })
 }
 
-/// Read RSS (resident set size) from /proc/[pid]/statm.
+/// Backward-compatible wrapper.
+fn read_cpu_ticks(pid_str: &str) -> Option<u64> {
+    read_proc_stat(pid_str).map(|s| s.cpu_ticks)
+}
+
+/// Read PSS (Proportional Set Size) from /proc/[pid]/smaps_rollup.
 ///
-/// /proc/[pid]/statm fields (space-separated):
-///   field 1: total program size (pages)
-///   field 2: RSS (pages) — this is what we want
+/// PSS splits shared pages proportionally among all processes using them,
+/// avoiding the double-counting problem of RSS.
+/// Returns PSS in KB.
+fn read_pss_kb(pid_str: &str) -> Option<u64> {
+    let path = format!("{}/{}/smaps_rollup", procfs_root(), pid_str);
+    let content = fs::read_to_string(&path).ok()?;
+    for line in content.lines() {
+        if line.starts_with("Pss:") {
+            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+            return Some(kb);
+        }
+    }
+    None
+}
+
+/// Read RSS (resident set size) from /proc/[pid]/statm (fallback for PSS).
 fn read_rss_pages(pid_str: &str) -> Option<u64> {
     let statm_path = format!("{}/{}/statm", procfs_root(), pid_str);
     let content = fs::read_to_string(&statm_path).ok()?;
@@ -671,7 +705,11 @@ fn read_rss_pages(pid_str: &str) -> Option<u64> {
 ///
 /// Power is distributed based on:
 ///   CPU power → proportional to each pod's CPU time delta (utime + stime)
-///   Memory power → proportional to each pod's RSS (resident set size)
+///   Memory power → weighted combination of:
+///     - PSS (Proportional Set Size) — static DRAM power (60% weight)
+///       PSS splits shared pages proportionally, avoiding double-counting
+///     - Page fault delta (minflt + majflt) — dynamic DRAM access power (40% weight)
+///       Processes actively accessing memory cause more DRAM power
 ///
 /// This is significantly more accurate than process-count-based attribution
 /// because a pod running at 100% CPU gets proportionally more power than
@@ -683,13 +721,14 @@ fn enumerate_pods(
     total_mem_uw: u64,
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
+    prev_page_faults: &mut HashMap<u32, (u64, u64)>,
 ) -> Vec<PodPowerReport> {
-    // Phase 1: Scan ALL processes for CPU time (pod and non-pod)
-    // We need total CPU time across ALL processes for proper normalization.
-    // A pod using 10% of total node CPU should get 10% of power, not 90%.
+    // Phase 1: Scan ALL processes for CPU time, PSS, and page faults.
+    // Normalize against ALL processes (not just pods) for proper attribution.
     let mut process_metrics: Vec<ProcessMetrics> = Vec::new();
-    let mut total_all_cpu_ticks: u64 = 0; // ALL processes, not just pods
-    let mut total_all_rss: u64 = 0;
+    let mut total_all_cpu_ticks: u64 = 0;
+    let mut total_all_pss: u64 = 0;
+    let mut total_all_pgfaults: u64 = 0;
 
     let proc_entries = match fs::read_dir(procfs_root()) {
         Ok(entries) => entries,
@@ -702,39 +741,46 @@ fn enumerate_pods(
             continue;
         }
 
-        // Skip threads (LWPs) — only count process leaders.
-        // A thread's TGID (field 4 in /proc/[pid]/status) differs from its PID.
-        // For process leaders, TGID == PID.
-        // /proc/[pid]/stat field 4 (after comm) is PPID, field 1 (before comm) is PID.
-        // Simpler check: if /proc/[pid]/task/[pid]/children doesn't list this as leader,
-        // or check /proc/[pid]/status for Tgid.
+        // Skip threads — only process leaders (Tgid == PID)
         let tgid_path = format!("{}/{}/status", procfs_root(), pid_str);
         if let Ok(status) = fs::read_to_string(&tgid_path) {
             if let Some(tgid_line) = status.lines().find(|l| l.starts_with("Tgid:")) {
                 let tgid = tgid_line.split_whitespace().nth(1).unwrap_or("");
                 if tgid != pid_str {
-                    continue; // This is a thread, skip it
+                    continue;
                 }
             }
         }
 
-        // Read CPU time for ALL processes (process leaders only)
-        let current_ticks = match read_cpu_ticks(&pid_str) {
-            Some(t) => t,
+        // Read CPU time + page faults from /proc/[pid]/stat
+        let proc_stat = match read_proc_stat(&pid_str) {
+            Some(s) => s,
             None => continue,
         };
 
         let pid: u32 = pid_str.parse().unwrap_or(0);
-        let prev = prev_cpu_ticks.get(&pid).copied().unwrap_or(current_ticks);
-        let cpu_delta = current_ticks.saturating_sub(prev);
-        prev_cpu_ticks.insert(pid, current_ticks);
 
-        // Count toward total (all processes)
+        // CPU time delta
+        let prev_ticks = prev_cpu_ticks.get(&pid).copied().unwrap_or(proc_stat.cpu_ticks);
+        let cpu_delta = proc_stat.cpu_ticks.saturating_sub(prev_ticks);
+        prev_cpu_ticks.insert(pid, proc_stat.cpu_ticks);
         total_all_cpu_ticks += cpu_delta;
 
-        // Read RSS
-        let rss = read_rss_pages(&pid_str).unwrap_or(0);
-        total_all_rss += rss;
+        // Page fault deltas
+        let (prev_min, prev_maj) = prev_page_faults.get(&pid).copied()
+            .unwrap_or((proc_stat.minflt, proc_stat.majflt));
+        let minflt_delta = proc_stat.minflt.saturating_sub(prev_min);
+        let majflt_delta = proc_stat.majflt.saturating_sub(prev_maj);
+        prev_page_faults.insert(pid, (proc_stat.minflt, proc_stat.majflt));
+        let pgfaults = minflt_delta + majflt_delta * 10; // Major faults weighted 10× (disk I/O)
+        total_all_pgfaults += pgfaults;
+
+        // Read PSS from /proc/[pid]/smaps_rollup (faster than full smaps)
+        // Falls back to RSS if smaps_rollup unavailable
+        let pss = read_pss_kb(&pid_str).unwrap_or_else(|| {
+            read_rss_pages(&pid_str).unwrap_or(0) * 4 // pages → KB (4KB pages)
+        });
+        total_all_pss += pss;
 
         // Check if this process belongs to a pod
         let cgroup_path = format!("{}/{}/cgroup", procfs_root(), pid_str);
@@ -747,7 +793,9 @@ fn enumerate_pods(
             process_metrics.push(ProcessMetrics {
                 pod_uid,
                 cpu_ticks: cpu_delta,
-                rss_pages: rss,
+                rss_pages: pss, // Now PSS (KB), not RSS pages
+                minflt_delta,
+                majflt_delta,
             });
         }
     }
@@ -759,7 +807,8 @@ fn enumerate_pods(
     // Phase 2: Aggregate per-process metrics to per-pod
     struct PodMetrics {
         cpu_ticks: u64,
-        rss_pages: u64,
+        pss_kb: u64,
+        pgfaults: u64, // weighted: minflt + 10*majflt
     }
 
     let mut pod_metrics: HashMap<String, PodMetrics> = HashMap::new();
@@ -767,18 +816,29 @@ fn enumerate_pods(
     for pm in &process_metrics {
         let entry = pod_metrics.entry(pm.pod_uid.clone()).or_insert(PodMetrics {
             cpu_ticks: 0,
-            rss_pages: 0,
+            pss_kb: 0,
+            pgfaults: 0,
         });
         entry.cpu_ticks += pm.cpu_ticks;
-        entry.rss_pages += pm.rss_pages;
+        entry.pss_kb += pm.rss_pages; // This is now PSS in KB
+        entry.pgfaults += pm.minflt_delta + pm.majflt_delta * 10;
     }
 
-    // Phase 3: Normalize against ALL processes (not just pods)
-    // This ensures a pod using 10% of total CPU gets 10% of power.
+    // Phase 3: Normalize against ALL processes
     let total_cpu_ticks = total_all_cpu_ticks;
-    let total_rss = total_all_rss;
+    let total_pss = total_all_pss;
+    let total_pgfaults = total_all_pgfaults;
 
     // Phase 4: Attribute power proportionally
+    //
+    // Memory power model: 60% static (PSS) + 40% dynamic (page faults)
+    //   Static: proportional to PSS — holding memory in DIMMs costs power
+    //   Dynamic: proportional to page fault rate — active access costs more
+    //
+    // If page fault data is zero (first interval), fall back to 100% PSS.
+    let pss_weight = if total_pgfaults > 0 { 0.6 } else { 1.0 };
+    let pgfault_weight = if total_pgfaults > 0 { 0.4 } else { 0.0 };
+
     pod_metrics
         .iter()
         .map(|(pod_uid, metrics)| {
@@ -790,12 +850,18 @@ fn enumerate_pods(
             };
             let pod_cpu_uw = (total_cpu_uw as f64 * cpu_ratio) as u64;
 
-            // Memory power proportional to RSS (resident memory)
-            let mem_ratio = if total_rss > 0 {
-                metrics.rss_pages as f64 / total_rss as f64
+            // Memory power: weighted PSS (static) + page faults (dynamic)
+            let pss_ratio = if total_pss > 0 {
+                metrics.pss_kb as f64 / total_pss as f64
             } else {
                 0.0
             };
+            let pgfault_ratio = if total_pgfaults > 0 {
+                metrics.pgfaults as f64 / total_pgfaults as f64
+            } else {
+                0.0
+            };
+            let mem_ratio = pss_weight * pss_ratio + pgfault_weight * pgfault_ratio;
             let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
 
             // Resolve pod name and namespace
@@ -821,7 +887,7 @@ fn enumerate_pods(
 
 /// Clean up stale PIDs from the CPU ticks cache.
 /// Called periodically to prevent unbounded growth.
-fn cleanup_stale_pids(prev_cpu_ticks: &mut HashMap<u32, u64>) {
+fn cleanup_stale_pids(prev_cpu_ticks: &mut HashMap<u32, u64>, prev_page_faults: &mut HashMap<u32, (u64, u64)>) {
     let active_pids: std::collections::HashSet<u32> = fs::read_dir(procfs_root())
         .map(|entries| {
             entries
@@ -832,6 +898,7 @@ fn cleanup_stale_pids(prev_cpu_ticks: &mut HashMap<u32, u64>) {
         .unwrap_or_default();
 
     prev_cpu_ticks.retain(|pid, _| active_pids.contains(pid));
+    prev_page_faults.retain(|pid, _| active_pids.contains(pid));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
