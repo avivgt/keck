@@ -120,6 +120,7 @@ async fn handle_cluster(
         "sources": agg.all_sources().iter().map(|s| {
             serde_json::json!({
                 "name": s.name,
+                "node_name": s.node_name,
                 "component": s.component,
                 "reading_type": s.reading_type,
                 "available": s.available,

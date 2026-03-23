@@ -193,6 +193,7 @@ const PowerManagementPage: React.FC = () => {
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
                     <th style={{ textAlign: "left", padding: "8px" }}>Source</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Node</th>
                     <th style={{ textAlign: "left", padding: "8px" }}>Component</th>
                     <th style={{ textAlign: "left", padding: "8px" }}>Type</th>
                     <th style={{ textAlign: "right", padding: "8px" }}>Reading</th>
@@ -208,7 +209,8 @@ const PowerManagementPage: React.FC = () => {
                       fontWeight: src.selected ? 600 : 400,
                     }}>
                       <td style={{ padding: "8px" }}>{src.name}</td>
-                      <td style={{ padding: "8px", textTransform: "uppercase" }}>
+                      <td style={{ padding: "8px", fontSize: "0.85em" }}>{src.node_name || "—"}</td>
+                      <td style={{ padding: "8px" }}>
                         {src.component === "cpu" ? "CPU" : src.component === "gpu" ? "GPU" : src.component.charAt(0).toUpperCase() + src.component.slice(1)}
                       </td>
                       <td style={{ padding: "8px" }}>
