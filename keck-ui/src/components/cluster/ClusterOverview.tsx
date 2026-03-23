@@ -23,13 +23,18 @@ import {
   Tr,
   Th,
   Td,
+  ThProps,
 } from "@patternfly/react-table";
 import { api, NamespacePower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
 
+type SortKey = "namespace" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "pod_count";
+
 const ClusterOverview: React.FC = () => {
   const [namespaces, setNamespaces] = React.useState<NamespacePower[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [sortBy, setSortBy] = React.useState<SortKey>("total_watts");
+  const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const history = useHistory();
 
   React.useEffect(() => {
@@ -118,36 +123,59 @@ const ClusterOverview: React.FC = () => {
       </PageSection>
 
       <PageSection>
-        {namespaces.length > 0 ? (
-          <Table aria-label="Namespace power table" variant="compact">
-            <Thead>
-              <Tr>
-                <Th>Namespace</Th>
-                <Th>Total Power</Th>
-                <Th>CPU</Th>
-                <Th>Memory</Th>
-                <Th>GPU</Th>
-                <Th>Pods</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
-              {namespaces.map((ns) => (
-                <Tr
-                  key={ns.namespace}
-                  isClickable
-                  onRowClick={() => history.push(`/power-management/namespaces/${ns.namespace}`)}
-                >
-                  <Td>{ns.namespace}</Td>
-                  <Td>{formatWatts(ns.total_watts)}</Td>
-                  <Td>{formatWatts(ns.cpu_watts)}</Td>
-                  <Td>{formatWatts(ns.memory_watts)}</Td>
-                  <Td>{formatWatts(ns.gpu_watts)}</Td>
-                  <Td>{ns.pod_count}</Td>
+        {namespaces.length > 0 ? (() => {
+          const sorted = [...namespaces].sort((a, b) => {
+            const av = a[sortBy] as any;
+            const bv = b[sortBy] as any;
+            if (typeof av === "string") {
+              return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+            }
+            return sortDir === "asc" ? av - bv : bv - av;
+          });
+
+          const getSortParams = (key: SortKey): ThProps["sort"] => ({
+            sortBy: {
+              index: ["namespace", "total_watts", "cpu_watts", "memory_watts", "gpu_watts", "pod_count"].indexOf(sortBy),
+              direction: sortDir,
+            },
+            onSort: (_e, _idx, dir) => {
+              setSortBy(key);
+              setSortDir(dir as "asc" | "desc");
+            },
+            columnIndex: ["namespace", "total_watts", "cpu_watts", "memory_watts", "gpu_watts", "pod_count"].indexOf(key),
+          });
+
+          return (
+            <Table aria-label="Namespace power table" variant="compact">
+              <Thead>
+                <Tr>
+                  <Th sort={getSortParams("namespace")}>Namespace</Th>
+                  <Th sort={getSortParams("total_watts")}>Total Power</Th>
+                  <Th sort={getSortParams("cpu_watts")}>CPU</Th>
+                  <Th sort={getSortParams("memory_watts")}>Memory</Th>
+                  <Th sort={getSortParams("gpu_watts")}>GPU</Th>
+                  <Th sort={getSortParams("pod_count")}>Pods</Th>
                 </Tr>
-              ))}
-            </Tbody>
-          </Table>
-        ) : (
+              </Thead>
+              <Tbody>
+                {sorted.map((ns) => (
+                  <Tr
+                    key={ns.namespace}
+                    isClickable
+                    onRowClick={() => history.push(`/power-management/namespaces/${ns.namespace}`)}
+                  >
+                    <Td>{ns.namespace}</Td>
+                    <Td>{formatWatts(ns.total_watts)}</Td>
+                    <Td>{formatWatts(ns.cpu_watts)}</Td>
+                    <Td>{formatWatts(ns.memory_watts)}</Td>
+                    <Td>{formatWatts(ns.gpu_watts)}</Td>
+                    <Td>{ns.pod_count}</Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          );
+        })() : (
           <EmptyState>
             <EmptyStateBody>No namespace power data available.</EmptyStateBody>
           </EmptyState>
