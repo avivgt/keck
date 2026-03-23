@@ -200,7 +200,7 @@ const PowerManagementPage: React.FC = () => {
                     if (!q) return null;
                     return (
                       <tr key={comp} style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
-                        <td style={{ padding: "8px", textTransform: "capitalize" }}>{comp}</td>
+                        <td style={{ padding: "8px" }}>{comp === "cpu" ? "CPU" : comp === "gpu" ? "GPU" : comp.charAt(0).toUpperCase() + comp.slice(1)}</td>
                         <td style={{ padding: "8px" }}>{q.source}</td>
                         <td style={{ padding: "8px" }}>
                           <Label color={q.type === "measured" ? "green" : q.type === "estimated" ? "gold" : "red"}>
