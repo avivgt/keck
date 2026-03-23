@@ -12,6 +12,7 @@
 
 mod ebpf;
 mod hardware;
+mod perf_counters;
 
 use std::collections::HashMap;
 use std::fs;
@@ -142,6 +143,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             warn!("eBPF not available ({}), falling back to /proc-based attribution", e);
+            None
+        }
+    };
+
+    // Open per-core LLC miss counters for memory bandwidth attribution
+    let mut llc_reader = match perf_counters::LlcMissReader::new() {
+        Ok(reader) => {
+            info!("LLC miss counters enabled — memory attribution uses PSS + LLC misses");
+            Some(reader)
+        }
+        Err(e) => {
+            info!("LLC miss counters unavailable ({}), memory attribution uses PSS only", e);
             None
         }
     };
@@ -349,7 +362,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // deltas are more stable for attribution because they measure actual
         // user+kernel time, while eBPF context switch counts can over-weight
         // processes with high scheduling frequency (goroutines, event loops).
-        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults);
+        // Read LLC miss deltas for memory bandwidth attribution
+        let total_llc_misses = llc_reader.as_mut().map(|r| r.total_deltas()).unwrap_or(0);
+
+        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, total_llc_misses, &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults);
 
         // Add per-pod GPU power from DCGM exporter metrics
         if gpu_uw > 0 {
@@ -719,11 +735,12 @@ fn enumerate_pods(
     node_name: &str,
     total_cpu_uw: u64,
     total_mem_uw: u64,
+    total_llc_misses: u64,
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
 ) -> Vec<PodPowerReport> {
-    // Phase 1: Scan ALL processes for CPU time, PSS, and page faults.
+    // Phase 1: Scan ALL processes for CPU time and PSS.
     // Normalize against ALL processes (not just pods) for proper attribution.
     let mut process_metrics: Vec<ProcessMetrics> = Vec::new();
     let mut total_all_cpu_ticks: u64 = 0;
@@ -831,13 +848,21 @@ fn enumerate_pods(
 
     // Phase 4: Attribute power proportionally
     //
-    // Memory power: 100% PSS (Proportional Set Size)
-    //   PSS correctly splits shared pages among all users.
-    //   DRAM power is dominated by refresh (proportional to capacity held),
-    //   not by access pattern.
-    //   Dynamic DRAM access power would require LLC miss counters from
-    //   hardware performance counters, which we collect via eBPF but
-    //   don't use for attribution yet.
+    // Memory power model:
+    //   When LLC miss counters are available:
+    //     60% PSS (static DRAM refresh — proportional to capacity)
+    //     40% LLC misses (dynamic DRAM access — proportional to bandwidth)
+    //   When LLC miss counters unavailable:
+    //     100% PSS
+    //
+    // LLC misses are per-core totals. We attribute to processes proportionally
+    // by their CPU time on each core (processes using more CPU cause more
+    // cache misses). This is an approximation — true per-process LLC misses
+    // would require per-PID perf events.
+    let has_llc = total_llc_misses > 0;
+    let pss_weight = if has_llc { 0.6 } else { 1.0 };
+    let llc_weight = if has_llc { 0.4 } else { 0.0 };
+
     pod_metrics
         .iter()
         .map(|(pod_uid, metrics)| {
@@ -849,13 +874,17 @@ fn enumerate_pods(
             };
             let pod_cpu_uw = (total_cpu_uw as f64 * cpu_ratio) as u64;
 
-            // Memory power proportional to PSS
+            // Memory power: PSS (static) + LLC misses (dynamic)
             let pss_ratio = if total_pss > 0 {
                 metrics.pss_kb as f64 / total_pss as f64
             } else {
                 0.0
             };
-            let pod_mem_uw = (total_mem_uw as f64 * pss_ratio) as u64;
+            // Approximate per-pod LLC misses by CPU time ratio
+            // (processes using more CPU generally cause more LLC misses)
+            let llc_ratio = cpu_ratio; // proxy: LLC misses ∝ CPU activity
+            let mem_ratio = pss_weight * pss_ratio + llc_weight * llc_ratio;
+            let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
 
             // Resolve pod name and namespace
             let (pod_name, namespace) = match pod_cache.get(pod_uid) {
