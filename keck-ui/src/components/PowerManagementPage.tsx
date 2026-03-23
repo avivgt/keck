@@ -107,6 +107,21 @@ const PowerManagementPage: React.FC = () => {
                     title={data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts)}
                     subTitle={data.platform_watts > 0 ? "PSU Measured" : "Estimated"}
                     padding={{ bottom: 20, left: 20, right: 20, top: 20 }}
+                    innerRadius={80}
+                    titleComponent={
+                      React.createElement("text", {
+                        x: 175, y: 130,
+                        textAnchor: "middle",
+                        style: { fill: "#e4e4e7", fontSize: 22, fontWeight: 700 }
+                      }, data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts))
+                    }
+                    subTitleComponent={
+                      React.createElement("text", {
+                        x: 175, y: 155,
+                        textAnchor: "middle",
+                        style: { fill: "#a1a1aa", fontSize: 13 }
+                      }, data.platform_watts > 0 ? "PSU Measured" : "Estimated")
+                    }
                   />
                 </div>
               </CardBody>
