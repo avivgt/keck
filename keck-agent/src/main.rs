@@ -56,6 +56,7 @@ struct NodePowerReport {
 #[derive(Serialize)]
 struct SourceStatus {
     name: String,
+    node_name: String,
     component: String,
     reading_type: String,
     available: bool,
@@ -370,6 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } || (comp == "platform" && platform_uw.is_some() && *available);
             SourceStatus {
                 name: name.clone(),
+                node_name: node_name.clone(),
                 component: comp.clone(),
                 reading_type: rtype.clone(),
                 available: *available,

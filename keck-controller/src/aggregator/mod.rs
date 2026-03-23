@@ -55,6 +55,8 @@ pub struct NodePowerReport {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SourceStatus {
     pub name: String,
+    #[serde(default)]
+    pub node_name: String,
     pub component: String,
     pub reading_type: String,
     pub available: bool,
