@@ -64,10 +64,27 @@ type AgentSpec struct {
 }
 
 type RedfishSpec struct {
-	// Redfish endpoint URL
-	Endpoint string `json:"endpoint"`
-	// Secret containing username/password
+	// CredentialsSecret references a Secret with keys "username" and "password"
+	// for BMC authentication. The Secret must exist in the keck-system namespace.
 	CredentialsSecret string `json:"credentialsSecret"`
+
+	// NodeBMCMap maps node serial numbers to BMC/iDRAC endpoint URLs.
+	// The agent reads the node's serial from /sys/class/dmi/id/product_serial
+	// and looks up its BMC endpoint from this map.
+	//
+	// Example:
+	//   - serial: "41DQMH3"
+	//     endpoint: "https://192.168.52.166"
+	//   - serial: "D59N3L3"
+	//     endpoint: "https://192.168.52.172"
+	NodeBMCMap []NodeBMCEntry `json:"nodeBMCMap"`
+}
+
+type NodeBMCEntry struct {
+	// Serial number of the node (from DMI/SMBIOS product_serial)
+	Serial string `json:"serial"`
+	// BMC/iDRAC endpoint URL (e.g., https://192.168.52.172)
+	Endpoint string `json:"endpoint"`
 }
 
 type ControllerSpec struct {

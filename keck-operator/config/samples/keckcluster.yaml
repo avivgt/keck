@@ -1,44 +1,48 @@
-# Deploy Keck to the cluster with default settings.
-# Apply this after installing the operator.
+# Deploy Keck to the cluster with BMC power monitoring.
 apiVersion: keck.io/v1alpha1
 kind: KeckCluster
 metadata:
   name: keck
 spec:
   agent:
-    # Agent profile: minimal, standard, full
     defaultProfile: standard
 
-    # Tolerate control-plane nodes (meter everything)
     tolerations:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
         effect: NoSchedule
 
-    # Enable GPU monitoring if you have NVIDIA GPUs
-    gpuEnabled: false
+    # BMC/iDRAC configuration for real measured PSU power.
+    # This gives ground truth — actual watts at the PSU.
+    redfish:
+      # Secret containing keys "username" and "password"
+      credentialsSecret: redfish-credentials
 
-    # Uncomment to restrict to specific nodes
-    # nodeSelector:
-    #   kubernetes.io/os: linux
+      # Map each node's serial number to its BMC/iDRAC IP.
+      # Find serial numbers: cat /sys/class/dmi/id/product_serial
+      nodeBMCMap:
+        - serial: "41DQMH3"
+          endpoint: "https://192.168.52.166"
+        - serial: "D59N3L3"
+          endpoint: "https://192.168.52.172"
 
   controller:
     replicas: 1
-
-    # Enable power-aware scheduler
-    schedulerEnabled: false
-
-    # Carbon intensity tracking (optional)
-    # carbonAPIEndpoint: "https://api.electricitymap.org/v3"
-    # carbonRegion: "US-CAL-CISO"
-
-    # Energy cost for your region
-    energyCostPerKWh: "0.10"
-
-  # Fleet manager endpoint (optional — for multi-cluster setups)
-  # fleetEndpoint: "fleet-manager.example.com:9091"
 
   image:
     repository: ghcr.io/avivgt/keck
     tag: latest
     pullPolicy: IfNotPresent
+
+---
+# BMC credentials — create this before applying the KeckCluster.
+# In production, use sealed-secrets or external-secrets-operator.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redfish-credentials
+  namespace: keck-system
+type: Opaque
+stringData:
+  username: root
+  password: calvin

@@ -5,6 +5,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -198,6 +199,67 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 
 	image := fmt.Sprintf("%s:%s", imageRepo(keck), imageTag(keck))
 
+	// Build environment variables
+	envVars := []corev1.EnvVar{
+		{
+			Name: "NODE_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "spec.nodeName",
+				},
+			},
+		},
+		{
+			Name:  "KECK_CONTROLLER_URL",
+			Value: "http://keck-controller.keck-system.svc:8080",
+		},
+	}
+
+	// Add Redfish/BMC configuration if specified
+	if keck.Spec.Agent.Redfish != nil {
+		rf := keck.Spec.Agent.Redfish
+
+		// Build REDFISH_MAP from NodeBMCMap: "SERIAL1=https://ip1,SERIAL2=https://ip2"
+		if len(rf.NodeBMCMap) > 0 {
+			var mapEntries []string
+			for _, entry := range rf.NodeBMCMap {
+				mapEntries = append(mapEntries, fmt.Sprintf("%s=%s", entry.Serial, entry.Endpoint))
+			}
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  "REDFISH_MAP",
+				Value: strings.Join(mapEntries, ","),
+			})
+		}
+
+		// Inject credentials from Secret
+		if rf.CredentialsSecret != "" {
+			envVars = append(envVars,
+				corev1.EnvVar{
+					Name: "REDFISH_USERNAME",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: rf.CredentialsSecret,
+							},
+							Key: "username",
+						},
+					},
+				},
+				corev1.EnvVar{
+					Name: "REDFISH_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: rf.CredentialsSecret,
+							},
+							Key: "password",
+						},
+					},
+				},
+			)
+		}
+	}
+
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "keck-agent",
@@ -226,20 +288,7 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 							Image:           image,
 							ImagePullPolicy: keck.Spec.Image.PullPolicy,
 							Command:         []string{"/usr/bin/keck-agent"},
-							Env: []corev1.EnvVar{
-								{
-									Name: "NODE_NAME",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "spec.nodeName",
-										},
-									},
-								},
-								{
-									Name:  "KECK_CONTROLLER_URL",
-									Value: "http://keck-controller.keck-system.svc:8080",
-								},
-							},
+							Env:             envVars,
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
 							},
@@ -250,7 +299,6 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 							},
 							Ports: []corev1.ContainerPort{
 								{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP},
-								{Name: "grpc", ContainerPort: 9200, Protocol: corev1.ProtocolTCP},
 							},
 						},
 					},

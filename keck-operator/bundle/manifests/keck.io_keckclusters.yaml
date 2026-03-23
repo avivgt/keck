@@ -85,12 +85,25 @@ spec:
                       default: false
                     redfish:
                       type: object
+                      description: BMC/iDRAC configuration for real measured PSU power.
                       properties:
-                        endpoint:
-                          type: string
                         credentialsSecret:
                           type: string
-                      required: [endpoint, credentialsSecret]
+                          description: Secret name with keys "username" and "password" for BMC auth.
+                        nodeBMCMap:
+                          type: array
+                          description: Maps node serial numbers to BMC endpoint URLs.
+                          items:
+                            type: object
+                            properties:
+                              serial:
+                                type: string
+                                description: Node serial number (from /sys/class/dmi/id/product_serial).
+                              endpoint:
+                                type: string
+                                description: BMC/iDRAC URL (e.g., https://192.168.52.172).
+                            required: [serial, endpoint]
+                      required: [credentialsSecret, nodeBMCMap]
                 controller:
                   type: object
                   properties:
