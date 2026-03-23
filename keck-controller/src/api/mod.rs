@@ -117,6 +117,16 @@ async fn handle_cluster(
         "pod_count": power.pod_count,
         "avg_error_ratio": power.avg_error_ratio,
         "nodes": nodes_json,
+        "sources": agg.all_sources().iter().map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "component": s.component,
+                "reading_type": s.reading_type,
+                "available": s.available,
+                "selected": s.selected,
+                "watts": s.power_uw as f64 / 1e6,
+            })
+        }).collect::<Vec<_>>(),
         "data_quality": {
             "cpu": {
                 "source": &cpu_info.0,

@@ -43,12 +43,24 @@ struct NodePowerReport {
     pod_count: u32,
     process_count: u32,
     timestamp: SystemTime,
-    /// Source used for CPU power (e.g., "Redfish CPU" or "RAPL package")
+    /// Source used for CPU power
     cpu_source: String,
     /// Source used for memory power
     memory_source: String,
-    /// Reading type: "measured", "estimated", or "none"
+    /// Reading type for CPU: "measured", "estimated", or "none"
     cpu_reading_type: String,
+    /// All discovered sources with their status
+    sources: Vec<SourceStatus>,
+}
+
+#[derive(Serialize)]
+struct SourceStatus {
+    name: String,
+    component: String,
+    reading_type: String,
+    available: bool,
+    selected: bool,
+    power_uw: u64,
 }
 
 #[derive(Serialize)]
@@ -181,13 +193,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Read all sources and select the best per component.
         // Priority: Measured (Redfish) > Estimated (RAPL) > Unavailable
-        //
-        // Track per-component: (power_uw, source_name, reading_type)
         struct ComponentReading {
             power_uw: u64,
             source: String,
             reading_type: hardware::ReadingType,
         }
+
+        // Track ALL source readings for the sources list
+        let mut all_source_readings: Vec<(String, String, String, bool, u64)> = Vec::new(); // (name, component, type, available, power)
 
         let mut cpu_best: Option<ComponentReading> = None;
         let mut mem_best: Option<ComponentReading> = None;
@@ -199,6 +212,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(r) => r,
                 Err(e) => {
                     log::debug!("Failed to read {}: {}", source.name(), e);
+                    let type_str = match source.reading_type() {
+                        hardware::ReadingType::Measured => "measured",
+                        hardware::ReadingType::Estimated => "estimated",
+                        hardware::ReadingType::Derived => "derived",
+                    };
+                    all_source_readings.push((
+                        source.name().to_string(),
+                        format!("{}", source.component()),
+                        type_str.to_string(),
+                        false,
+                        0,
+                    ));
                     continue;
                 }
             };
@@ -225,6 +250,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 0
             };
+
+            let type_str = match reading.reading_type {
+                hardware::ReadingType::Measured => "measured",
+                hardware::ReadingType::Estimated => "estimated",
+                hardware::ReadingType::Derived => "derived",
+            };
+            let comp_str = format!("{}", source.component());
+            all_source_readings.push((
+                source.name().to_string(),
+                comp_str,
+                type_str.to_string(),
+                power_uw > 0,
+                power_uw,
+            ));
 
             if power_uw == 0 {
                 continue;
@@ -322,6 +361,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let pod_count = pods.len() as u32;
 
+        // Build source status list with selection markers
+        let sources_status: Vec<SourceStatus> = all_source_readings.iter().map(|(name, comp, rtype, available, power)| {
+            let selected = match comp.as_str() {
+                "cpu" => cpu_source == name,
+                "memory" => mem_source == name,
+                _ => false,
+            } || (comp == "platform" && platform_uw.is_some() && *available);
+            SourceStatus {
+                name: name.clone(),
+                component: comp.clone(),
+                reading_type: rtype.clone(),
+                available: *available,
+                selected,
+                power_uw: *power,
+            }
+        }).collect();
+
         let report = AgentReport {
             node: NodePowerReport {
                 node_name: node_name.clone(),
@@ -337,6 +393,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cpu_source: cpu_source.to_string(),
                 memory_source: mem_source.to_string(),
                 cpu_reading_type: cpu_type.to_string(),
+                sources: sources_status,
             },
             pods,
         };
