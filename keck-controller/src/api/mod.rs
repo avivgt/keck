@@ -87,6 +87,21 @@ async fn handle_cluster(
     let has_platform = power.platform_uw > 0;
     let has_gpu = power.gpu_uw > 0;
 
+    // Per-node breakdown
+    let nodes = agg.node_summaries();
+    let nodes_json: Vec<serde_json::Value> = nodes.iter().map(|n| {
+        serde_json::json!({
+            "node_name": n.node_name,
+            "cpu_watts": n.cpu_uw as f64 / 1e6,
+            "memory_watts": n.memory_uw as f64 / 1e6,
+            "gpu_watts": n.gpu_uw as f64 / 1e6,
+            "platform_watts": n.platform_uw.map(|v| v as f64 / 1e6),
+            "idle_watts": n.idle_uw as f64 / 1e6,
+            "pod_count": n.pod_count,
+            "error_ratio": n.error_ratio,
+        })
+    }).collect();
+
     Json(serde_json::json!({
         "cpu_watts": power.cpu_uw as f64 / 1e6,
         "memory_watts": power.memory_uw as f64 / 1e6,
@@ -97,6 +112,7 @@ async fn handle_cluster(
         "node_count": power.node_count,
         "pod_count": power.pod_count,
         "avg_error_ratio": power.avg_error_ratio,
+        "nodes": nodes_json,
         "data_quality": {
             "cpu": {
                 "source": "RAPL",

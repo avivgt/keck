@@ -87,21 +87,21 @@ const PowerManagementPage: React.FC = () => {
 
       <PageSection>
         <Gallery hasGutter minWidths={{ default: "250px" }}>
-          {/* Total Power */}
+          {/* Cluster Total */}
           <GalleryItem>
             <Card isCompact>
               <CardTitle>
                 <Flex>
                   <FlexItem><BoltIcon /></FlexItem>
-                  <FlexItem>Total Power</FlexItem>
+                  <FlexItem>Cluster Total</FlexItem>
                 </Flex>
               </CardTitle>
               <CardBody>
                 <div style={{ fontSize: "2em", fontWeight: 600 }}>
-                  {formatWatts(data.total_attributed_watts)}
+                  {data.platform_watts > 0 ? formatWatts(data.platform_watts) : formatWatts(data.total_attributed_watts)}
                 </div>
-                <div style={{ marginTop: 4 }}>
-                  Platform: {data.platform_watts > 0 ? formatWatts(data.platform_watts) : "N/A"}
+                <div style={{ marginTop: 4, fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>
+                  {data.platform_watts > 0 ? "Measured at PSU" : "Estimated (no PSU data)"}
                 </div>
               </CardBody>
             </Card>
@@ -178,6 +178,56 @@ const PowerManagementPage: React.FC = () => {
           </GalleryItem>
         </Gallery>
       </PageSection>
+
+      {/* Per-Node Breakdown */}
+      {(data as any).nodes && (data as any).nodes.length > 0 && (
+        <PageSection>
+          <Card>
+            <CardTitle>
+              <Flex>
+                <FlexItem><ServerIcon /></FlexItem>
+                <FlexItem>Per-Node Power</FlexItem>
+              </Flex>
+            </CardTitle>
+            <CardBody>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Node</th>
+                    <th style={{ textAlign: "right", padding: "8px" }}>Platform (PSU)</th>
+                    <th style={{ textAlign: "right", padding: "8px" }}>CPU</th>
+                    <th style={{ textAlign: "right", padding: "8px" }}>Memory</th>
+                    <th style={{ textAlign: "right", padding: "8px" }}>GPU</th>
+                    <th style={{ textAlign: "right", padding: "8px" }}>Pods</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data as any).nodes.map((node: any) => (
+                    <tr key={node.node_name} style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                      <td style={{ padding: "8px" }}>{node.node_name}</td>
+                      <td style={{ padding: "8px", textAlign: "right", fontWeight: 600 }}>
+                        {node.platform_watts ? formatWatts(node.platform_watts) : "N/A"}
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "right", color: "#0066cc" }}>
+                        {formatWatts(node.cpu_watts)}
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "right", color: "#6753ac" }}>
+                        {formatWatts(node.memory_watts)}
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "right", color: "#3e8635" }}>
+                        {formatWatts(node.gpu_watts)}
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "right" }}>
+                        {node.pod_count}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardBody>
+          </Card>
+        </PageSection>
+      )}
 
       {/* Data Quality & Alerts */}
       {(data as any).data_quality && (
