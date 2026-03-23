@@ -227,4 +227,12 @@ func (in *ImageSpec) DeepCopyInto(out *ImageSpec) {
 
 func (in *RedfishSpec) DeepCopyInto(out *RedfishSpec) {
 	*out = *in
+	if in.NodeBMCMap != nil {
+		out.NodeBMCMap = make([]NodeBMCEntry, len(in.NodeBMCMap))
+		copy(out.NodeBMCMap, in.NodeBMCMap)
+	}
+}
+
+func (in *NodeBMCEntry) DeepCopyInto(out *NodeBMCEntry) {
+	*out = *in
 }
