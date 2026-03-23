@@ -61,43 +61,6 @@ const ClusterOverview: React.FC = () => {
         </p>
       </PageSection>
 
-      <PageSection>
-        {namespaces.length > 0 ? (
-          <Table aria-label="Namespace power table" variant="compact">
-            <Thead>
-              <Tr>
-                <Th>Namespace</Th>
-                <Th>Total Power</Th>
-                <Th>CPU</Th>
-                <Th>Memory</Th>
-                <Th>GPU</Th>
-                <Th>Pods</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
-              {namespaces.map((ns) => (
-                <Tr
-                  key={ns.namespace}
-                  isClickable
-                  onRowClick={() => history.push(`/power-management/namespaces/${ns.namespace}`)}
-                >
-                  <Td>{ns.namespace}</Td>
-                  <Td>{formatWatts(ns.total_watts)}</Td>
-                  <Td>{formatWatts(ns.cpu_watts)}</Td>
-                  <Td>{formatWatts(ns.memory_watts)}</Td>
-                  <Td>{formatWatts(ns.gpu_watts)}</Td>
-                  <Td>{ns.pod_count}</Td>
-                </Tr>
-              ))}
-            </Tbody>
-          </Table>
-        ) : (
-          <EmptyState>
-            <EmptyStateBody>No namespace power data available.</EmptyStateBody>
-          </EmptyState>
-        )}
-      </PageSection>
-
       {/* Attribution Methodology */}
       <PageSection>
         <Card>
@@ -153,6 +116,44 @@ const ClusterOverview: React.FC = () => {
           </CardBody>
         </Card>
       </PageSection>
+
+      <PageSection>
+        {namespaces.length > 0 ? (
+          <Table aria-label="Namespace power table" variant="compact">
+            <Thead>
+              <Tr>
+                <Th>Namespace</Th>
+                <Th>Total Power</Th>
+                <Th>CPU</Th>
+                <Th>Memory</Th>
+                <Th>GPU</Th>
+                <Th>Pods</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {namespaces.map((ns) => (
+                <Tr
+                  key={ns.namespace}
+                  isClickable
+                  onRowClick={() => history.push(`/power-management/namespaces/${ns.namespace}`)}
+                >
+                  <Td>{ns.namespace}</Td>
+                  <Td>{formatWatts(ns.total_watts)}</Td>
+                  <Td>{formatWatts(ns.cpu_watts)}</Td>
+                  <Td>{formatWatts(ns.memory_watts)}</Td>
+                  <Td>{formatWatts(ns.gpu_watts)}</Td>
+                  <Td>{ns.pod_count}</Td>
+                </Tr>
+              ))}
+            </Tbody>
+          </Table>
+        ) : (
+          <EmptyState>
+            <EmptyStateBody>No namespace power data available.</EmptyStateBody>
+          </EmptyState>
+        )}
+      </PageSection>
+
     </Page>
   );
 };
