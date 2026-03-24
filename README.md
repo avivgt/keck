@@ -57,7 +57,7 @@ Runs as a DaemonSet. Collects and attributes power on each node.
 **Layer 0 — Hardware signals:**
 - RAPL energy counters (per-socket CPU + DRAM)
 - hwmon power sensors (direct electrical measurements)
-- GPU power (NVIDIA NVML, AMD ROCm)
+- GPU power (NVIDIA DCGM per-pod measured)
 - Platform power via Redfish/IPMI (PSU ground truth)
 - Tiered polling: fast (100ms), medium (500ms), slow (3s), heartbeat (5s)
 - Reconciliation: `Σ(components) vs PSU_input → error_ratio`
@@ -75,7 +75,7 @@ Runs as a DaemonSet. Collects and attributes power on each node.
   - **FrequencyWeighted**: time × freq²
   - **CpuTimeRatio**: time only (Kepler-equivalent fallback)
 - Normalization: `Σ(process_energy) = core_energy` (energy conservation guaranteed)
-- Memory attribution via LLC miss ratio
+- Memory attribution: 60% PSS + 40% LLC miss ratio (with PSS caching)
 - Aggregation: process → container → pod → namespace
 - Local ring buffer store with drill-down query API
 
@@ -83,7 +83,7 @@ Runs as a DaemonSet. Collects and attributes power on each node.
 
 Runs as a single Deployment. Aggregates power data across all nodes.
 
-- Receives pod-level summaries from node agents via gRPC
+- Receives pod-level summaries from node agents via HTTP POST
 - Aggregates: pod → namespace → cluster
 - Carbon intensity integration (Electricity Maps, WattTime, or static)
 - Cost calculation: energy × $/kWh (configurable per region)
@@ -150,7 +150,7 @@ keck/
 ├── keck-controller/   Cluster controller
 │   └── src/
 │       ├── aggregator/  Cluster-wide state
-│       ├── api/         gRPC + REST + K8s custom metrics
+│       ├── api/         REST API (axum) + bearer token auth
 │       ├── carbon/      Carbon intensity tracking
 │       └── scheduler/   Power-aware scheduler extender
 └── keck-fleet/        Fleet manager
@@ -365,72 +365,35 @@ The fleet manager aggregates data from all clusters and provides:
 
 ### Accessing the Dashboard
 
-The Keck UI is served by the controller:
+On **OpenShift**, the Keck UI integrates directly into the console as a
+Dynamic Console Plugin. After deployment, "Power Management" appears in
+the left navigation — no separate URL needed.
+
+For **non-OpenShift** clusters, port-forward to the controller REST API:
 
 ```bash
-# Port-forward to access locally
 kubectl port-forward -n keck-system svc/keck-controller 8080:8080
-
-# Open in browser
-open http://localhost:8080
-```
-
-Or expose via Ingress/Route:
-
-```yaml
-# OpenShift Route
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: keck-dashboard
-  namespace: keck-system
-spec:
-  to:
-    kind: Service
-    name: keck-controller
-  port:
-    targetPort: http
-  tls:
-    termination: edge
-```
-
-### Prometheus Integration
-
-Keck agents expose Prometheus metrics on each node. Add a ServiceMonitor
-for automatic scraping:
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: keck-agent
-  namespace: keck-system
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: keck-agent
-  endpoints:
-    - port: metrics
-      interval: 15s
+# API available at http://localhost:8080/api/v1/cluster
 ```
 
 ## Status
 
-**Early development.** The architecture, core algorithms, operator, and UI
-are implemented. The following integrations need to be completed before
-first deployment:
+**Deployed and running on OpenShift** (Dell PowerEdge R750, 2 nodes, NVIDIA A100 GPUs).
 
-- [x] Kubernetes operator with OLM bundle
+- [x] Kubernetes operator with OLM bundle and finalizer cleanup
 - [x] CRDs: KeckCluster, PowerBudget, PowerProfile
-- [x] React dashboard with zoom model
-- [ ] GPU power reading (NVIDIA NVML)
-- [ ] Redfish/IPMI HTTP client
-- [ ] Kubelet API client for cgroup resolution
-- [ ] gRPC wiring between agent ↔ controller ↔ fleet
-- [ ] REST API servers (axum)
-- [ ] Prometheus metric registration
-- [ ] Container images (agent, controller, fleet)
-- [ ] Linux build validation and testing
+- [x] OpenShift console plugin ("Power Management" in left nav)
+- [x] GPU power via DCGM (per-pod, measured from hardware)
+- [x] Vendor-agnostic Redfish discovery (3-level probing)
+- [x] Source priority system (Measured > Estimated, auto-select)
+- [x] REST API with bearer token auth and input validation
+- [x] Per-process CPU attribution (/proc + eBPF frequency weighting)
+- [x] Per-process memory attribution (PSS + LLC misses, cached reads)
+- [x] Container images built on OCP (agent, controller, UI)
+- [x] 139 unit tests across all components
+- [ ] Prometheus /metrics endpoint
+- [ ] Fleet manager deployment
+- [ ] Carbon tracking connected to external API
 - [ ] Benchmark: agent overhead vs Kepler
 
 ## License
