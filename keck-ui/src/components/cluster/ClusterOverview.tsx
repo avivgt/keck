@@ -118,7 +118,12 @@ const ClusterOverview: React.FC = () => {
                 equivalent memory.
                 <br /><br />
                 When LLC counters are unavailable, falls back to 100% PSS.
-                <br />Formula: pod memory power = node memory power × (0.6 × PSS ratio + 0.4 × LLC miss ratio).
+                <br /><br />
+                All ratios are normalized against ALL processes on the node (not just pods).
+                Non-pod processes (kernel threads, systemd, node services) also hold memory
+                and cause LLC misses — their share is not attributed to any pod.
+                This means the sum of all pod memory power is less than total node memory power.
+                <br />Formula: pod memory power = node memory power × (0.6 × pod_PSS/total_PSS + 0.4 × pod_LLC/total_LLC).
               </p>
 
               <p style={{ marginTop: 12 }}><strong>5. Per-pod GPU attribution (DCGM)</strong></p>
