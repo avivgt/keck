@@ -356,25 +356,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.0
         };
 
-        // Attribution uses /proc/[pid]/stat CPU time deltas and RSS.
-        // eBPF sched_switch data is collected for future per-core frequency
-        // weighting but not used for power distribution yet — /proc CPU time
-        // deltas are more stable for attribution because they measure actual
-        // user+kernel time, while eBPF context switch counts can over-weight
-        // processes with high scheduling frequency (goroutines, event loops).
         // Read LLC miss deltas for memory bandwidth attribution
         let total_llc_misses = llc_reader.as_mut().map(|r| r.total_deltas()).unwrap_or(0);
 
-        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, total_llc_misses, &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults);
+        // Drain eBPF maps
+        let ebpf_snapshot = ebpf_observer.as_mut().and_then(|obs| obs.drain().ok());
+
+        // When CPU source is RAPL (estimated), use eBPF per-core data for
+        // frequency-weighted attribution. When CPU source is Redfish (measured),
+        // eBPF per-core data doesn't add value — use /proc CPU time ratios.
+        // Always use /proc for full pod list + PSS + memory attribution.
+        // When CPU source is RAPL (estimated) and eBPF has data, override
+        // CPU attribution with frequency-weighted per-core data from eBPF.
+        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, total_llc_misses,
+            &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults);
+
+        if cpu_type == "estimated" {
+            if let Some(ref snapshot) = ebpf_snapshot {
+                if !snapshot.pid_cpu_times.is_empty() {
+                    // Compute frequency-weighted CPU attribution from eBPF
+                    let ebpf_pods = enumerate_pods_ebpf_weighted(
+                        &node_name, cpu_uw, mem_uw, total_llc_misses,
+                        &pod_cache, snapshot,
+                    );
+
+                    // Override CPU power for pods that eBPF saw (active pods)
+                    if !ebpf_pods.is_empty() {
+                        let ebpf_map: HashMap<String, u64> = ebpf_pods.iter()
+                            .map(|p| (p.pod_uid.clone(), p.cpu_uw))
+                            .collect();
+
+                        for pod in &mut pods {
+                            if let Some(&ebpf_cpu) = ebpf_map.get(&pod.pod_uid) {
+                                pod.cpu_uw = ebpf_cpu;
+                                pod.total_uw = pod.cpu_uw + pod.memory_uw + pod.gpu_uw;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Add per-pod GPU power from DCGM exporter metrics
         if gpu_uw > 0 {
             add_gpu_power_to_pods(&node_name, &mut pods);
-        }
-
-        // Drain eBPF maps to prevent unbounded growth (data collected for future use)
-        if let Some(ref mut obs) = ebpf_observer {
-            let _ = obs.drain();
         }
 
         // Periodically clean up stale PIDs from the cache
@@ -630,6 +655,148 @@ fn enumerate_pods_ebpf(
             }
         })
         .collect()
+}
+
+// ─── Pod enumeration via eBPF with frequency weighting (RAPL path) ──
+
+/// Frequency-weighted per-core attribution using eBPF data.
+///
+/// Only used when CPU source is RAPL (estimated). When Redfish is available,
+/// this function is not called.
+///
+/// Algorithm:
+/// 1. Compute per-core weighted busy time: freq² × time_at_freq
+/// 2. Split RAPL socket energy to cores proportionally
+/// 3. Attribute per-core energy to PIDs by their time on each core
+/// 4. Sum across cores for per-PID total
+///
+/// This is more accurate than flat CPU time ratios because:
+/// - A process on a core at 3.5GHz gets ~3× more power than one at 1.2GHz
+/// - Cross-socket attribution is correct (socket 0 energy goes only to
+///   processes that ran on socket 0 cores)
+fn enumerate_pods_ebpf_weighted(
+    node_name: &str,
+    total_cpu_uw: u64,
+    total_mem_uw: u64,
+    total_llc_misses: u64,
+    pod_cache: &HashMap<String, PodInfo>,
+    snapshot: &ebpf::EbpfSnapshot,
+) -> Vec<PodPowerReport> {
+    // Step 1: Compute per-core weighted busy time from frequency data
+    // Weight = freq_khz² × time_ns (power ∝ V²f, V scales with f)
+    let mut core_weight: HashMap<u32, f64> = HashMap::new();
+    for &(cpu, freq_khz, time_ns) in &snapshot.cpu_freq_times {
+        let freq_factor = (freq_khz as f64 / 1_000_000.0).powi(2);
+        *core_weight.entry(cpu).or_default() += freq_factor * time_ns as f64;
+    }
+
+    // If no frequency data, fall back to equal weighting using pid_cpu_times
+    if core_weight.is_empty() {
+        for &(cpu, _, time_ns) in &snapshot.pid_cpu_times {
+            *core_weight.entry(cpu).or_default() += time_ns as f64;
+        }
+    }
+
+    let total_weight: f64 = core_weight.values().sum();
+    if total_weight <= 0.0 {
+        return Vec::new();
+    }
+
+    // Step 2: Compute per-core energy (split total proportionally)
+    let mut core_energy: HashMap<u32, f64> = HashMap::new();
+    for (&cpu, &weight) in &core_weight {
+        let ratio = weight / total_weight;
+        core_energy.insert(cpu, total_cpu_uw as f64 * ratio);
+    }
+
+    // Step 3: Build per-PID per-core time and map to pods
+    let mut pid_pod: HashMap<u32, String> = HashMap::new();
+    let mut core_pid_time: HashMap<u32, Vec<(u32, u64)>> = HashMap::new(); // core → [(pid, ns)]
+
+    for &(cpu, pid, time_ns) in &snapshot.pid_cpu_times {
+        // Resolve PID to pod UID
+        if !pid_pod.contains_key(&pid) {
+            let cgroup_path = format!("{}/{}/cgroup", procfs_root(), pid);
+            if let Ok(content) = fs::read_to_string(&cgroup_path) {
+                if let Some(uid) = extract_pod_uid(&content) {
+                    pid_pod.insert(pid, uid);
+                }
+            }
+        }
+
+        core_pid_time.entry(cpu).or_default().push((pid, time_ns));
+    }
+
+    // Step 4: Attribute per-core energy to PIDs
+    let mut pod_cpu_uw: HashMap<String, f64> = HashMap::new();
+
+    for (&cpu, pids) in &core_pid_time {
+        let ce = core_energy.get(&cpu).copied().unwrap_or(0.0);
+        if ce <= 0.0 { continue; }
+
+        let total_time: u64 = pids.iter().map(|&(_, t)| t).sum();
+        if total_time == 0 { continue; }
+
+        for &(pid, time_ns) in pids {
+            if let Some(pod_uid) = pid_pod.get(&pid) {
+                let ratio = time_ns as f64 / total_time as f64;
+                *pod_cpu_uw.entry(pod_uid.clone()).or_default() += ce * ratio;
+            }
+        }
+    }
+
+    // Step 5: Get PSS for memory attribution
+    // Read PSS for all pod processes
+    let mut pod_pss: HashMap<String, u64> = HashMap::new();
+    let mut total_pss: u64 = 0;
+    for (&pid, pod_uid) in &pid_pod {
+        let pss = read_pss_kb(&pid.to_string()).unwrap_or(0);
+        *pod_pss.entry(pod_uid.clone()).or_default() += pss;
+        total_pss += pss;
+    }
+
+    // Step 6: Build reports
+    let total_pod_cpu: f64 = pod_cpu_uw.values().sum();
+
+    // Collect all pod UIDs
+    let all_uids: std::collections::HashSet<&String> = pod_cpu_uw.keys()
+        .chain(pod_pss.keys())
+        .collect();
+
+    all_uids.iter().map(|pod_uid| {
+        let cpu = pod_cpu_uw.get(*pod_uid).copied().unwrap_or(0.0) as u64;
+
+        let pss = pod_pss.get(*pod_uid).copied().unwrap_or(0);
+        let pss_ratio = if total_pss > 0 { pss as f64 / total_pss as f64 } else { 0.0 };
+        let llc_ratio = if total_pod_cpu > 0.0 {
+            pod_cpu_uw.get(*pod_uid).copied().unwrap_or(0.0) / total_pod_cpu
+        } else { 0.0 };
+
+        let has_llc = total_llc_misses > 0;
+        let mem_ratio = if has_llc {
+            0.6 * pss_ratio + 0.4 * llc_ratio
+        } else {
+            pss_ratio
+        };
+        let mem = (total_mem_uw as f64 * mem_ratio) as u64;
+
+        let (pod_name, namespace) = match pod_cache.get(*pod_uid) {
+            Some(info) => (info.name.clone(), info.namespace.clone()),
+            None => ((*pod_uid).clone(), "unknown".into()),
+        };
+
+        PodPowerReport {
+            node_name: node_name.to_string(),
+            pod_uid: (*pod_uid).clone(),
+            pod_name,
+            namespace,
+            cpu_uw: cpu,
+            memory_uw: mem,
+            gpu_uw: 0,
+            total_uw: cpu + mem,
+            timestamp: SystemTime::now(),
+        }
+    }).collect()
 }
 
 // ─── Pod enumeration via /proc (fallback) ────────────────────────
