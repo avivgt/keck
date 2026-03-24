@@ -165,6 +165,103 @@ pub fn generate_daily_report(registry: &ClusterRegistry) -> Report {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::*;
+
+    fn make_cluster_report(name: &str, total_watts: f64, carbon_intensity: f64) -> crate::registry::ClusterReport {
+        crate::registry::ClusterReport {
+            cluster_id: format!("id-{}", name),
+            cluster_name: name.into(),
+            region: "us-east-1".into(),
+            provider: "bare-metal".into(),
+            power: ClusterPowerSummary {
+                total_watts,
+                cpu_watts: total_watts * 0.6,
+                memory_watts: total_watts * 0.2,
+                gpu_watts: 0.0,
+                idle_watts: total_watts * 0.2,
+                platform_watts: None,
+            },
+            namespaces: vec![
+                NamespaceSummary { namespace: "prod".into(), total_watts: total_watts * 0.7, pod_count: 10 },
+            ],
+            carbon: CarbonData {
+                intensity_grams_per_kwh: carbon_intensity,
+                emissions_grams_per_hour: total_watts / 1000.0 * carbon_intensity,
+                cost_per_kwh: 0.10,
+                currency: "USD".into(),
+            },
+            node_count: 3,
+            pod_count: 10,
+            avg_error_ratio: 0.05,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_generate_daily_report_empty_registry() {
+        let reg = ClusterRegistry::new();
+        let report = generate_daily_report(&reg);
+
+        assert!(report.id.starts_with("daily-"));
+        assert_eq!(report.data.fleet.energy_kwh, 0.0);
+        assert_eq!(report.data.fleet.carbon_kg, 0.0);
+        assert!(report.data.clusters.is_empty());
+    }
+
+    #[test]
+    fn test_generate_daily_report_with_data() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("prod", 1000.0, 400.0));
+
+        let report = generate_daily_report(&reg);
+
+        // 1000W * 24h = 24 kWh
+        assert!((report.data.fleet.energy_kwh - 24.0).abs() < 1e-6);
+        // 1000W/1000 * 400 gCO2/kWh * 24h / 1000 = 9.6 kgCO2
+        assert!((report.data.fleet.carbon_kg - 9.6).abs() < 0.1);
+        // 24 kWh * $0.10 = $2.40
+        assert!((report.data.fleet.cost - 2.4).abs() < 0.1);
+        assert_eq!(report.data.clusters.len(), 1);
+    }
+
+    #[test]
+    fn test_daily_report_multiple_clusters() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("us", 1000.0, 400.0));
+        reg.ingest(make_cluster_report("eu", 500.0, 200.0));
+
+        let report = generate_daily_report(&reg);
+        assert_eq!(report.data.clusters.len(), 2);
+        // 1500W * 24h = 36 kWh
+        assert!((report.data.fleet.energy_kwh - 36.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_daily_report_teams() {
+        let mut reg = ClusterRegistry::new();
+        reg.set_namespace_owner("prod", "platform");
+        reg.ingest(make_cluster_report("prod-cluster", 1000.0, 400.0));
+
+        let report = generate_daily_report(&reg);
+        assert!(!report.data.teams.is_empty());
+        let platform = report.data.teams.iter().find(|t| t.team == "platform");
+        assert!(platform.is_some());
+    }
+
+    #[test]
+    fn test_daily_report_avg_carbon_intensity() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("prod", 1000.0, 400.0));
+
+        let report = generate_daily_report(&reg);
+        // avg_intensity = carbon_kg * 1000 / energy_kwh = 9.6 * 1000 / 24 = 400
+        assert!((report.data.fleet.avg_carbon_intensity - 400.0).abs() < 1.0);
+    }
+}
+
 /// Background task: generates daily reports automatically.
 pub async fn run_report_generator(registry: Arc<RwLock<ClusterRegistry>>) {
     let report_interval = Duration::from_secs(86400); // 24 hours

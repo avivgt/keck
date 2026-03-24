@@ -189,3 +189,47 @@ pub struct Reconciliation {
     /// Error ratio: |unaccounted| / platform
     pub error_ratio: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_power_breakdown_total() {
+        let breakdown = PowerBreakdown {
+            cpu_uw: 1000,
+            memory_uw: 500,
+            gpu_uw: 200,
+            nic_uw: 50,
+            storage_uw: 30,
+        };
+        assert_eq!(breakdown.total_uw(), 1780);
+    }
+
+    #[test]
+    fn test_power_breakdown_default_is_zero() {
+        let breakdown = PowerBreakdown::default();
+        assert_eq!(breakdown.total_uw(), 0);
+        assert_eq!(breakdown.cpu_uw, 0);
+        assert_eq!(breakdown.memory_uw, 0);
+    }
+
+    #[test]
+    fn test_reading_type_equality() {
+        assert_eq!(ReadingType::Measured, ReadingType::Measured);
+        assert_ne!(ReadingType::Measured, ReadingType::Estimated);
+        assert_ne!(ReadingType::Estimated, ReadingType::Derived);
+    }
+
+    #[test]
+    fn test_component_equality() {
+        assert_eq!(Component::Cpu, Component::Cpu);
+        assert_ne!(Component::Cpu, Component::Memory);
+    }
+
+    #[test]
+    fn test_attribution_method_equality() {
+        assert_eq!(AttributionMethod::FullModel, AttributionMethod::FullModel);
+        assert_ne!(AttributionMethod::FullModel, AttributionMethod::CpuTimeRatio);
+    }
+}

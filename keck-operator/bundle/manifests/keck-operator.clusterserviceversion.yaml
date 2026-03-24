@@ -204,7 +204,7 @@ spec:
                           "powerprofiles", "powerprofiles/status", "powerprofiles/finalizers"]
               verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
             - apiGroups: [""]
-              resources: ["namespaces", "serviceaccounts", "services", "configmaps"]
+              resources: ["namespaces", "serviceaccounts", "services", "configmaps", "secrets"]
               verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
             - apiGroups: [""]
               resources: ["nodes", "pods"]

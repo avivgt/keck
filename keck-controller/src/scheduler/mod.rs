@@ -274,3 +274,152 @@ impl PowerScheduler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregator::*;
+
+    fn make_node(name: &str, cpu: u64, mem: u64, gpu: u64, platform: Option<u64>, error_ratio: f64) -> NodePowerReport {
+        NodePowerReport {
+            node_name: name.into(),
+            cpu_uw: cpu,
+            memory_uw: mem,
+            gpu_uw: gpu,
+            platform_uw: platform,
+            idle_uw: 1000,
+            error_ratio,
+            pod_count: 5,
+            process_count: 50,
+            timestamp: std::time::SystemTime::now(),
+            cpu_source: "rapl".into(),
+            memory_source: "estimated".into(),
+            cpu_reading_type: "estimated".into(),
+            sources: vec![],
+        }
+    }
+
+    fn make_pod(node: &str, uid: &str, ns: &str, cpu: u64) -> PodPowerReport {
+        PodPowerReport {
+            node_name: node.into(),
+            pod_uid: uid.into(),
+            pod_name: format!("pod-{}", uid),
+            namespace: ns.into(),
+            cpu_uw: cpu,
+            memory_uw: 0,
+            gpu_uw: 0,
+            total_uw: cpu,
+            timestamp: std::time::SystemTime::now(),
+        }
+    }
+
+    fn make_scheduler(aggregator: Arc<RwLock<ClusterAggregator>>) -> PowerScheduler {
+        PowerScheduler::new(aggregator)
+    }
+
+    #[tokio::test]
+    async fn test_filter_allows_unknown_nodes() {
+        let agg = Arc::new(RwLock::new(ClusterAggregator::new()));
+        let scheduler = make_scheduler(agg);
+
+        let result = scheduler.filter(&["unknown-node".into()], "default").await;
+        assert_eq!(result.nodes.len(), 1);
+        assert!(result.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_filter_rejects_high_error_ratio() {
+        let agg = Arc::new(RwLock::new(ClusterAggregator::new()));
+        {
+            let mut a = agg.write().await;
+            a.ingest(AgentReport {
+                node: make_node("bad-node", 5000, 2000, 0, None, 0.60), // 60% error
+                pods: vec![],
+            });
+        }
+        let scheduler = make_scheduler(agg);
+
+        let result = scheduler.filter(&["bad-node".into()], "default").await;
+        assert!(result.nodes.is_empty());
+        assert!(result.failed.contains_key("bad-node"));
+    }
+
+    #[tokio::test]
+    async fn test_filter_allows_low_error_ratio() {
+        let agg = Arc::new(RwLock::new(ClusterAggregator::new()));
+        {
+            let mut a = agg.write().await;
+            a.ingest(AgentReport {
+                node: make_node("good-node", 5000, 2000, 0, None, 0.05),
+                pods: vec![],
+            });
+        }
+        let scheduler = make_scheduler(agg);
+
+        let result = scheduler.filter(&["good-node".into()], "default").await;
+        assert_eq!(result.nodes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_filter_rejects_over_namespace_budget() {
+        let agg = Arc::new(RwLock::new(ClusterAggregator::new()));
+        {
+            let mut a = agg.write().await;
+            a.ingest(AgentReport {
+                node: make_node("node-1", 5000, 2000, 0, None, 0.05),
+                pods: vec![make_pod("node-1", "uid-1", "prod", 5_000_000)], // 5W
+            });
+        }
+
+        let mut scheduler = make_scheduler(agg);
+        scheduler.config.namespace_budgets.insert("prod".into(), 1.0); // 1W budget
+
+        let result = scheduler.filter(&["node-1".into()], "prod").await;
+        assert!(result.nodes.is_empty());
+        assert!(result.failed.contains_key("node-1"));
+    }
+
+    #[tokio::test]
+    async fn test_prioritize_unknown_nodes_get_neutral_score() {
+        let agg = Arc::new(RwLock::new(ClusterAggregator::new()));
+        let scheduler = make_scheduler(agg);
+
+        let result = scheduler.prioritize(&["unknown".into()]).await;
+        assert_eq!(result.scores.len(), 1);
+        assert_eq!(result.scores[0].score, 50);
+    }
+
+    #[tokio::test]
+    async fn test_prioritize_scores_nodes() {
+        let agg = Arc::new(RwLock::new(ClusterAggregator::new()));
+        {
+            let mut a = agg.write().await;
+            // High utilization node (good for bin-packing)
+            a.ingest(AgentReport {
+                node: make_node("busy-node", 8000, 3000, 0, Some(15000), 0.05),
+                pods: vec![],
+            });
+            // Low utilization node
+            a.ingest(AgentReport {
+                node: make_node("idle-node", 1000, 500, 0, Some(15000), 0.05),
+                pods: vec![],
+            });
+        }
+        let scheduler = make_scheduler(agg);
+
+        let result = scheduler.prioritize(&["busy-node".into(), "idle-node".into()]).await;
+        assert_eq!(result.scores.len(), 2);
+        // With BinPack strategy, busy node should score higher
+        let busy_score = result.scores.iter().find(|s| s.node_name == "busy-node").unwrap().score;
+        let idle_score = result.scores.iter().find(|s| s.node_name == "idle-node").unwrap().score;
+        assert!(busy_score > idle_score);
+    }
+
+    #[test]
+    fn test_scheduler_config_defaults() {
+        let config = SchedulerConfig::default();
+        assert!((config.headroom_weight - 0.7).abs() < 1e-10);
+        assert!((config.accuracy_weight - 0.3).abs() < 1e-10);
+        assert!(config.namespace_budgets.is_empty());
+    }
+}

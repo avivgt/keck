@@ -124,6 +124,8 @@ pub struct NodeSummary {
     /// Available power headroom (for scheduler)
     /// platform_uw - (cpu + memory + gpu)
     pub headroom_uw: Option<u64>,
+    pub cpu_source: String,
+    pub cpu_reading_type: String,
     #[serde(skip)]
     pub last_seen: Instant,
     pub last_seen_secs_ago: u64,
@@ -306,6 +308,8 @@ impl ClusterAggregator {
                     error_ratio: r.error_ratio,
                     pod_count: r.pod_count,
                     headroom_uw: headroom,
+                    cpu_source: r.cpu_source.clone(),
+                    cpu_reading_type: r.cpu_reading_type.clone(),
                     last_seen: state.received_at,
                     last_seen_secs_ago: state.received_at.elapsed().as_secs(),
                 }
@@ -381,5 +385,602 @@ impl ClusterAggregator {
 
         // Remove empty namespaces
         self.history.retain(|_, entries| !entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── Helper factories ────────────────────────────────────────
+
+    fn make_pod(node: &str, uid: &str, name: &str, ns: &str, cpu: u64, mem: u64, gpu: u64) -> PodPowerReport {
+        PodPowerReport {
+            node_name: node.into(),
+            pod_uid: uid.into(),
+            pod_name: name.into(),
+            namespace: ns.into(),
+            cpu_uw: cpu,
+            memory_uw: mem,
+            gpu_uw: gpu,
+            total_uw: cpu + mem + gpu,
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    fn make_node(name: &str, cpu: u64, mem: u64, gpu: u64, platform: Option<u64>, idle: u64) -> NodePowerReport {
+        NodePowerReport {
+            node_name: name.into(),
+            cpu_uw: cpu,
+            memory_uw: mem,
+            gpu_uw: gpu,
+            platform_uw: platform,
+            idle_uw: idle,
+            error_ratio: 0.05,
+            pod_count: 0,
+            process_count: 0,
+            timestamp: SystemTime::now(),
+            cpu_source: "rapl".into(),
+            memory_source: "estimated".into(),
+            cpu_reading_type: "estimated".into(),
+            sources: vec![],
+        }
+    }
+
+    fn make_report(node: NodePowerReport, pods: Vec<PodPowerReport>) -> AgentReport {
+        AgentReport { node, pods }
+    }
+
+    // ─── ingest() tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_ingest_single_report() {
+        let mut agg = ClusterAggregator::new();
+        let pod = make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0);
+        let node = make_node("node-1", 5000, 2000, 0, Some(10000), 3000);
+        let report = make_report(node, vec![pod]);
+
+        agg.ingest(report);
+
+        assert_eq!(agg.nodes.len(), 1);
+        assert_eq!(agg.pods.len(), 1);
+        assert!(agg.pod_power("uid-a").is_some());
+        assert_eq!(agg.pod_power("uid-a").unwrap().cpu_uw, 1000);
+    }
+
+    #[test]
+    fn test_ingest_multiple_reports_same_node() {
+        let mut agg = ClusterAggregator::new();
+
+        // First report with two pods
+        let pods1 = vec![
+            make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0),
+            make_pod("node-1", "uid-b", "web-2", "default", 2000, 800, 0),
+        ];
+        agg.ingest(make_report(make_node("node-1", 5000, 2000, 0, None, 1000), pods1));
+        assert_eq!(agg.pods.len(), 2);
+
+        // Second report from same node, updated values
+        let pods2 = vec![
+            make_pod("node-1", "uid-a", "web-1", "default", 1500, 600, 0),
+            make_pod("node-1", "uid-b", "web-2", "default", 2500, 900, 0),
+        ];
+        agg.ingest(make_report(make_node("node-1", 6000, 2500, 0, None, 1200), pods2));
+        assert_eq!(agg.pods.len(), 2);
+        assert_eq!(agg.pod_power("uid-a").unwrap().cpu_uw, 1500);
+    }
+
+    #[test]
+    fn test_ingest_multiple_nodes() {
+        let mut agg = ClusterAggregator::new();
+
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![make_pod("node-1", "uid-a", "web-1", "ns-1", 1000, 500, 0)],
+        ));
+        agg.ingest(make_report(
+            make_node("node-2", 3000, 1000, 0, None, 800),
+            vec![make_pod("node-2", "uid-b", "api-1", "ns-2", 800, 300, 0)],
+        ));
+
+        assert_eq!(agg.nodes.len(), 2);
+        assert_eq!(agg.pods.len(), 2);
+    }
+
+    #[test]
+    fn test_ingest_pod_eviction_when_no_longer_reported() {
+        let mut agg = ClusterAggregator::new();
+
+        // Report with 3 pods
+        let pods1 = vec![
+            make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0),
+            make_pod("node-1", "uid-b", "web-2", "default", 2000, 800, 0),
+            make_pod("node-1", "uid-c", "web-3", "default", 3000, 1000, 0),
+        ];
+        agg.ingest(make_report(make_node("node-1", 8000, 3000, 0, None, 2000), pods1));
+        assert_eq!(agg.pods.len(), 3);
+
+        // Next report only has 2 pods — uid-b was terminated
+        let pods2 = vec![
+            make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0),
+            make_pod("node-1", "uid-c", "web-3", "default", 3000, 1000, 0),
+        ];
+        agg.ingest(make_report(make_node("node-1", 6000, 2000, 0, None, 1500), pods2));
+        assert_eq!(agg.pods.len(), 2);
+        assert!(agg.pod_power("uid-b").is_none());
+        assert!(agg.pod_power("uid-a").is_some());
+        assert!(agg.pod_power("uid-c").is_some());
+    }
+
+    #[test]
+    fn test_ingest_pod_eviction_does_not_affect_other_nodes() {
+        let mut agg = ClusterAggregator::new();
+
+        // Node-1 with pod-a, Node-2 with pod-b
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0)],
+        ));
+        agg.ingest(make_report(
+            make_node("node-2", 3000, 1000, 0, None, 800),
+            vec![make_pod("node-2", "uid-b", "api-1", "default", 800, 300, 0)],
+        ));
+        assert_eq!(agg.pods.len(), 2);
+
+        // Node-1 reports with no pods — only uid-a should be evicted
+        agg.ingest(make_report(
+            make_node("node-1", 2000, 500, 0, None, 1500),
+            vec![],
+        ));
+        assert_eq!(agg.pods.len(), 1);
+        assert!(agg.pod_power("uid-a").is_none());
+        assert!(agg.pod_power("uid-b").is_some());
+    }
+
+    #[test]
+    fn test_ingest_records_history() {
+        let mut agg = ClusterAggregator::new();
+        let pod = make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0);
+        agg.ingest(make_report(make_node("node-1", 5000, 2000, 0, None, 1000), vec![pod]));
+
+        let since = SystemTime::now() - Duration::from_secs(10);
+        let history = agg.namespace_history("default", since);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].1, 1500); // total_uw = cpu + mem + gpu
+    }
+
+    // ─── cluster_power() tests ───────────────────────────────────
+
+    #[test]
+    fn test_cluster_power_empty() {
+        let agg = ClusterAggregator::new();
+        let power = agg.cluster_power();
+        assert_eq!(power.cpu_uw, 0);
+        assert_eq!(power.memory_uw, 0);
+        assert_eq!(power.gpu_uw, 0);
+        assert_eq!(power.platform_uw, 0);
+        assert_eq!(power.idle_uw, 0);
+        assert_eq!(power.node_count, 0);
+        assert_eq!(power.pod_count, 0);
+        assert_eq!(power.avg_error_ratio, 0.0);
+    }
+
+    #[test]
+    fn test_cluster_power_single_node() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 1000, Some(15000), 3000),
+            vec![make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 200)],
+        ));
+
+        let power = agg.cluster_power();
+        assert_eq!(power.cpu_uw, 5000);
+        assert_eq!(power.memory_uw, 2000);
+        assert_eq!(power.gpu_uw, 1000);
+        assert_eq!(power.platform_uw, 15000);
+        assert_eq!(power.idle_uw, 3000);
+        assert_eq!(power.total_attributed_uw, 8000); // cpu + mem + gpu
+        assert_eq!(power.node_count, 1);
+        assert_eq!(power.pod_count, 1);
+    }
+
+    #[test]
+    fn test_cluster_power_multi_node() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, Some(10000), 3000),
+            vec![make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0)],
+        ));
+        agg.ingest(make_report(
+            make_node("node-2", 3000, 1000, 500, Some(8000), 2000),
+            vec![make_pod("node-2", "uid-b", "api-1", "prod", 800, 300, 100)],
+        ));
+
+        let power = agg.cluster_power();
+        assert_eq!(power.cpu_uw, 8000);
+        assert_eq!(power.memory_uw, 3000);
+        assert_eq!(power.gpu_uw, 500);
+        assert_eq!(power.platform_uw, 18000);
+        assert_eq!(power.idle_uw, 5000);
+        assert_eq!(power.node_count, 2);
+        assert_eq!(power.pod_count, 2);
+    }
+
+    #[test]
+    fn test_cluster_power_platform_uw_none_treated_as_zero() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 3000),
+            vec![],
+        ));
+        let power = agg.cluster_power();
+        assert_eq!(power.platform_uw, 0);
+    }
+
+    #[test]
+    fn test_cluster_power_avg_error_ratio() {
+        let mut agg = ClusterAggregator::new();
+        let mut node1 = make_node("node-1", 5000, 2000, 0, None, 3000);
+        node1.error_ratio = 0.10;
+        let mut node2 = make_node("node-2", 3000, 1000, 0, None, 2000);
+        node2.error_ratio = 0.20;
+
+        agg.ingest(make_report(node1, vec![]));
+        agg.ingest(make_report(node2, vec![]));
+
+        let power = agg.cluster_power();
+        assert!((power.avg_error_ratio - 0.15).abs() < 1e-10);
+    }
+
+    // ─── namespace_power() tests ─────────────────────────────────
+
+    #[test]
+    fn test_namespace_power_empty() {
+        let agg = ClusterAggregator::new();
+        assert!(agg.namespace_power().is_empty());
+    }
+
+    #[test]
+    fn test_namespace_power_single_namespace() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![
+                make_pod("node-1", "uid-a", "web-1", "prod", 1000, 500, 0),
+                make_pod("node-1", "uid-b", "web-2", "prod", 2000, 800, 0),
+            ],
+        ));
+
+        let ns = agg.namespace_power();
+        assert_eq!(ns.len(), 1);
+        assert_eq!(ns[0].namespace, "prod");
+        assert_eq!(ns[0].cpu_uw, 3000);
+        assert_eq!(ns[0].memory_uw, 1300);
+        assert_eq!(ns[0].pod_count, 2);
+    }
+
+    #[test]
+    fn test_namespace_power_multiple_namespaces_sorted() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 10000, 5000, 0, None, 2000),
+            vec![
+                make_pod("node-1", "uid-a", "web-1", "low-power", 100, 50, 0),
+                make_pod("node-1", "uid-b", "api-1", "high-power", 5000, 2000, 0),
+                make_pod("node-1", "uid-c", "ml-1", "medium-power", 1000, 500, 0),
+            ],
+        ));
+
+        let ns = agg.namespace_power();
+        assert_eq!(ns.len(), 3);
+        // Sorted by total_uw descending
+        assert_eq!(ns[0].namespace, "high-power");
+        assert_eq!(ns[1].namespace, "medium-power");
+        assert_eq!(ns[2].namespace, "low-power");
+    }
+
+    #[test]
+    fn test_namespace_power_pods_across_nodes() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![make_pod("node-1", "uid-a", "web-1", "prod", 1000, 500, 0)],
+        ));
+        agg.ingest(make_report(
+            make_node("node-2", 3000, 1000, 0, None, 800),
+            vec![make_pod("node-2", "uid-b", "web-2", "prod", 2000, 800, 0)],
+        ));
+
+        let ns = agg.namespace_power();
+        assert_eq!(ns.len(), 1);
+        assert_eq!(ns[0].cpu_uw, 3000);
+        assert_eq!(ns[0].pod_count, 2);
+    }
+
+    // ─── pods_in_namespace() tests ───────────────────────────────
+
+    #[test]
+    fn test_pods_in_namespace_correct_filtering() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 10000, 5000, 0, None, 2000),
+            vec![
+                make_pod("node-1", "uid-a", "web-1", "prod", 1000, 500, 0),
+                make_pod("node-1", "uid-b", "web-2", "staging", 2000, 800, 0),
+                make_pod("node-1", "uid-c", "web-3", "prod", 3000, 1000, 0),
+            ],
+        ));
+
+        let prod_pods = agg.pods_in_namespace("prod");
+        assert_eq!(prod_pods.len(), 2);
+        let uids: Vec<&str> = prod_pods.iter().map(|p| p.pod_uid.as_str()).collect();
+        assert!(uids.contains(&"uid-a"));
+        assert!(uids.contains(&"uid-c"));
+    }
+
+    #[test]
+    fn test_pods_in_namespace_empty() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![make_pod("node-1", "uid-a", "web-1", "prod", 1000, 500, 0)],
+        ));
+
+        assert!(agg.pods_in_namespace("nonexistent").is_empty());
+    }
+
+    // ─── node_summaries() tests ──────────────────────────────────
+
+    #[test]
+    fn test_node_summaries_headroom_with_platform() {
+        let mut agg = ClusterAggregator::new();
+        // cpu=5000, mem=2000, gpu=1000 => used=8000, platform=15000 => headroom=7000
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 1000, Some(15000), 3000),
+            vec![],
+        ));
+
+        let summaries = agg.node_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].headroom_uw, Some(7000));
+    }
+
+    #[test]
+    fn test_node_summaries_headroom_without_platform() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 3000),
+            vec![],
+        ));
+
+        let summaries = agg.node_summaries();
+        assert_eq!(summaries[0].headroom_uw, None);
+    }
+
+    #[test]
+    fn test_node_summaries_headroom_saturating_sub() {
+        let mut agg = ClusterAggregator::new();
+        // used (5000+2000+1000=8000) > platform (5000) => headroom saturates to 0
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 1000, Some(5000), 0),
+            vec![],
+        ));
+
+        let summaries = agg.node_summaries();
+        assert_eq!(summaries[0].headroom_uw, Some(0));
+    }
+
+    #[test]
+    fn test_node_summaries_forwards_cpu_source() {
+        let mut agg = ClusterAggregator::new();
+        let mut node = make_node("node-1", 5000, 2000, 0, None, 1000);
+        node.cpu_source = "rapl_msr".into();
+        node.cpu_reading_type = "measured".into();
+        agg.ingest(make_report(node, vec![]));
+
+        let summaries = agg.node_summaries();
+        assert_eq!(summaries[0].cpu_source, "rapl_msr");
+        assert_eq!(summaries[0].cpu_reading_type, "measured");
+    }
+
+    // ─── node_summary() tests ────────────────────────────────────
+
+    #[test]
+    fn test_node_summary_found() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![],
+        ));
+
+        assert!(agg.node_summary("node-1").is_some());
+        assert_eq!(agg.node_summary("node-1").unwrap().cpu_uw, 5000);
+    }
+
+    #[test]
+    fn test_node_summary_not_found() {
+        let agg = ClusterAggregator::new();
+        assert!(agg.node_summary("nonexistent").is_none());
+    }
+
+    // ─── pod_power() tests ───────────────────────────────────────
+
+    #[test]
+    fn test_pod_power_found() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 5000, 2000, 0, None, 1000),
+            vec![make_pod("node-1", "uid-a", "web-1", "default", 1234, 567, 89)],
+        ));
+
+        let pod = agg.pod_power("uid-a").unwrap();
+        assert_eq!(pod.cpu_uw, 1234);
+        assert_eq!(pod.memory_uw, 567);
+        assert_eq!(pod.gpu_uw, 89);
+        assert_eq!(pod.total_uw, 1890);
+    }
+
+    #[test]
+    fn test_pod_power_not_found() {
+        let agg = ClusterAggregator::new();
+        assert!(agg.pod_power("nonexistent").is_none());
+    }
+
+    // ─── namespace_history() tests ───────────────────────────────
+
+    #[test]
+    fn test_namespace_history_filtering() {
+        let mut agg = ClusterAggregator::new();
+        let now = SystemTime::now();
+
+        // Insert history entries manually
+        agg.history.insert("prod".into(), vec![
+            (now - Duration::from_secs(100), 5000),
+            (now - Duration::from_secs(50), 6000),
+            (now - Duration::from_secs(10), 7000),
+        ]);
+
+        // Only entries after 60 seconds ago
+        let since = now - Duration::from_secs(60);
+        let history = agg.namespace_history("prod", since);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].1, 6000);
+        assert_eq!(history[1].1, 7000);
+    }
+
+    #[test]
+    fn test_namespace_history_nonexistent_namespace() {
+        let agg = ClusterAggregator::new();
+        let since = SystemTime::now() - Duration::from_secs(3600);
+        assert!(agg.namespace_history("nonexistent", since).is_empty());
+    }
+
+    // ─── cpu_source_info() and memory_source_info() tests ────────
+
+    #[test]
+    fn test_cpu_source_info_no_nodes() {
+        let agg = ClusterAggregator::new();
+        let (source, reading_type) = agg.cpu_source_info();
+        assert_eq!(source, "unknown");
+        assert_eq!(reading_type, "none");
+    }
+
+    #[test]
+    fn test_memory_source_info_no_nodes() {
+        let agg = ClusterAggregator::new();
+        assert_eq!(agg.memory_source_info(), "unknown");
+    }
+
+    #[test]
+    fn test_cpu_source_info_with_node() {
+        let mut agg = ClusterAggregator::new();
+        let mut node = make_node("node-1", 5000, 2000, 0, None, 1000);
+        node.cpu_source = "rapl_sysfs".into();
+        node.cpu_reading_type = "estimated".into();
+        agg.ingest(make_report(node, vec![]));
+
+        let (source, reading_type) = agg.cpu_source_info();
+        assert_eq!(source, "rapl_sysfs");
+        assert_eq!(reading_type, "estimated");
+    }
+
+    // ─── all_sources() tests ─────────────────────────────────────
+
+    #[test]
+    fn test_all_sources_empty() {
+        let agg = ClusterAggregator::new();
+        assert!(agg.all_sources().is_empty());
+    }
+
+    #[test]
+    fn test_all_sources_merged_from_nodes() {
+        let mut agg = ClusterAggregator::new();
+        let mut node1 = make_node("node-1", 5000, 2000, 0, None, 1000);
+        node1.sources = vec![SourceStatus {
+            name: "rapl".into(),
+            node_name: "node-1".into(),
+            component: "cpu".into(),
+            reading_type: "estimated".into(),
+            available: true,
+            selected: true,
+            power_uw: 5000,
+        }];
+        let mut node2 = make_node("node-2", 3000, 1000, 0, None, 800);
+        node2.sources = vec![SourceStatus {
+            name: "hwmon".into(),
+            node_name: "node-2".into(),
+            component: "cpu".into(),
+            reading_type: "estimated".into(),
+            available: true,
+            selected: true,
+            power_uw: 3000,
+        }];
+
+        agg.ingest(make_report(node1, vec![]));
+        agg.ingest(make_report(node2, vec![]));
+
+        assert_eq!(agg.all_sources().len(), 2);
+    }
+
+    // ─── node_count() tests ──────────────────────────────────────
+
+    #[test]
+    fn test_node_count() {
+        let mut agg = ClusterAggregator::new();
+        assert_eq!(agg.node_count(), 0);
+
+        agg.ingest(make_report(make_node("node-1", 5000, 2000, 0, None, 1000), vec![]));
+        assert_eq!(agg.node_count(), 1);
+
+        agg.ingest(make_report(make_node("node-2", 3000, 1000, 0, None, 800), vec![]));
+        assert_eq!(agg.node_count(), 2);
+    }
+
+    // ─── Edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ingest_empty_pods() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(make_node("node-1", 5000, 2000, 0, None, 1000), vec![]));
+        assert_eq!(agg.nodes.len(), 1);
+        assert_eq!(agg.pods.len(), 0);
+    }
+
+    #[test]
+    fn test_large_power_values() {
+        let mut agg = ClusterAggregator::new();
+        let large = u64::MAX / 4;
+        agg.ingest(make_report(
+            make_node("node-1", large, large, 0, Some(u64::MAX / 2), large),
+            vec![make_pod("node-1", "uid-a", "big", "default", large, large, 0)],
+        ));
+
+        let power = agg.cluster_power();
+        assert_eq!(power.cpu_uw, large);
+        assert_eq!(power.memory_uw, large);
+    }
+
+    #[test]
+    fn test_zero_power_values() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(
+            make_node("node-1", 0, 0, 0, Some(0), 0),
+            vec![make_pod("node-1", "uid-a", "idle", "default", 0, 0, 0)],
+        ));
+
+        let power = agg.cluster_power();
+        assert_eq!(power.total_attributed_uw, 0);
+        assert_eq!(power.pod_count, 1);
+    }
+
+    #[test]
+    fn test_repeated_node_updates_replace_state() {
+        let mut agg = ClusterAggregator::new();
+        agg.ingest(make_report(make_node("node-1", 5000, 2000, 0, None, 1000), vec![]));
+        agg.ingest(make_report(make_node("node-1", 9000, 4000, 0, None, 2000), vec![]));
+
+        let power = agg.cluster_power();
+        assert_eq!(power.cpu_uw, 9000);
+        assert_eq!(power.node_count, 1);
     }
 }
