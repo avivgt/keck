@@ -1,0 +1,20 @@
+---
+schema: olm.package
+name: keck-operator
+defaultChannel: alpha
+---
+schema: olm.channel
+name: alpha
+package: keck-operator
+entries:
+  - name: keck-operator.v0.1.0
+---
+schema: olm.bundle
+name: keck-operator.v0.1.0
+package: keck-operator
+image: BUNDLE_IMG_PLACEHOLDER
+properties:
+  - type: olm.package
+    value:
+      packageName: keck-operator
+      version: 0.1.0
