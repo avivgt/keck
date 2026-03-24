@@ -1,0 +1,23 @@
+# Add Keck Operator to OpenShift OperatorHub.
+#
+# Usage:
+#   oc apply -f https://raw.githubusercontent.com/avivgt/keck/main/install.yaml
+#
+# Then go to: Operators → OperatorHub → search "Keck" → Install
+#
+# To remove:
+#   oc delete catalogsource keck-operator-catalog -n openshift-marketplace
+
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: keck-operator-catalog
+  namespace: openshift-marketplace
+spec:
+  sourceType: grpc
+  image: ghcr.io/avivgt/keck-catalog:latest
+  displayName: Keck Power Management
+  publisher: Keck Project
+  updateStrategy:
+    registryPoll:
+      interval: 10m
