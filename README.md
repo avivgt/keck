@@ -181,27 +181,42 @@ cargo build -p keck-fleet
 cd keck-operator && make build
 ```
 
+## Quick Install on OpenShift
+
+Add Keck to your cluster's OperatorHub with one command:
+
+```bash
+oc apply -f https://raw.githubusercontent.com/avivgt/keck/main/install.yaml
+```
+
+Then in the OpenShift console:
+
+1. Go to **Operators → OperatorHub**
+2. Search for **"Keck"**
+3. Click **Keck Power Management** → **Install**
+4. After installation, go to **Installed Operators → Keck Operator**
+5. Click **Create KeckCluster** to deploy agents and controller
+
+To remove:
+```bash
+oc delete catalogsource keck-operator-catalog -n openshift-marketplace
+```
+
 ## Deployment
 
-For detailed step-by-step OpenShift deployment instructions (building images
-on OCP, installing via OLM, deploying the console plugin), see
+For detailed step-by-step deployment instructions, see
 **[docs/openshift-deployment.md](docs/openshift-deployment.md)**.
 
 ### Option 1: OpenShift / OLM (Recommended for Production)
 
 The Keck operator follows the Red Hat Operator Lifecycle Manager (OLM)
-standard. It can be installed from OperatorHub or from a custom catalog.
+standard. Use the quick install above, or build from source:
 
 ```bash
-# Build and push all images
-cd keck-operator
-make release   # builds: operator, bundle, catalog images
+# Build and push operator, bundle, and catalog images to ghcr.io
+./scripts/release.sh 0.1.0
 
-# Add Keck catalog to the cluster
-make catalog-deploy
-
-# Install the operator via OLM Subscription
-make subscription-deploy
+# Users then install via: oc apply -f install.yaml
 ```
 
 After the operator is installed, create a `KeckCluster` resource to
