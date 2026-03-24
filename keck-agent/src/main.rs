@@ -168,6 +168,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let report_url = format!("{}/api/v1/report", controller_url);
+    let api_key = std::env::var("KECK_API_KEY").ok();
+    if api_key.is_some() {
+        info!("API key configured for controller authentication");
+    }
 
     // Previous readings for delta computation
     let mut prev_readings: HashMap<String, u64> = HashMap::new();
@@ -175,6 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Per-process caches for computing deltas
     let mut prev_cpu_ticks: HashMap<u32, u64> = HashMap::new();
     let mut prev_page_faults: HashMap<u32, (u64, u64)> = HashMap::new(); // (minflt, majflt)
+    let mut pss_cache: HashMap<u32, u64> = HashMap::new(); // pid → PSS in KB (refreshed every 5 cycles)
     let mut tick_count: u32 = 0;
 
     // Pod metadata cache: uid → (name, namespace)
@@ -369,7 +374,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // When CPU source is RAPL (estimated) and eBPF has data, override
         // CPU attribution with frequency-weighted per-core data from eBPF.
         let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, total_llc_misses,
-            &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults);
+            &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults,
+            &mut pss_cache, tick_count);
 
         if cpu_type == "estimated" {
             if let Some(ref snapshot) = ebpf_snapshot {
@@ -399,13 +405,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Add per-pod GPU power from DCGM exporter metrics
         if gpu_uw > 0 {
-            add_gpu_power_to_pods(&node_name, &mut pods);
+            add_gpu_power_to_pods(&node_name, &mut pods, &http_client, &pod_cache).await;
         }
 
-        // Periodically clean up stale PIDs from the cache
+        // Periodically clean up stale PIDs from caches and BPF maps
         tick_count += 1;
         if tick_count % 30 == 0 {
-            cleanup_stale_pids(&mut prev_cpu_ticks, &mut prev_page_faults);
+            cleanup_stale_pids(&mut prev_cpu_ticks, &mut prev_page_faults, &mut pss_cache);
+            if let Some(ref mut observer) = ebpf_observer {
+                match observer.cleanup_dead_pids() {
+                    Ok(n) if n > 0 => info!("Cleaned {} dead PIDs from BPF PID_CGROUP map", n),
+                    Err(e) => warn!("BPF PID_CGROUP cleanup failed: {}", e),
+                    _ => {}
+                }
+            }
         }
         let pod_count = pods.len() as u32;
 
@@ -449,7 +462,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pods,
         };
 
-        match http_client.post(&report_url).json(&report).send().await {
+        let mut req = http_client.post(&report_url).json(&report);
+        if let Some(ref key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 info!(
                     "Reported: cpu={:.1}W({}) mem={:.1}W platform={} pods={}",
@@ -906,7 +923,11 @@ fn enumerate_pods(
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
+    pss_cache: &mut HashMap<u32, u64>,
+    tick_count: u64,
 ) -> Vec<PodPowerReport> {
+    // Only refresh PSS every 5 cycles (~50s) — smaps_rollup is expensive
+    let refresh_pss = tick_count % 5 == 0;
     // Phase 1: Scan ALL processes for CPU time and PSS.
     // Normalize against ALL processes (not just pods) for proper attribution.
     let mut process_metrics: Vec<ProcessMetrics> = Vec::new();
@@ -959,11 +980,23 @@ fn enumerate_pods(
         let pgfaults = minflt_delta + majflt_delta * 10; // Major faults weighted 10× (disk I/O)
         total_all_pgfaults += pgfaults;
 
-        // Read PSS from /proc/[pid]/smaps_rollup (faster than full smaps)
-        // Falls back to RSS if smaps_rollup unavailable
-        let pss = read_pss_kb(&pid_str).unwrap_or_else(|| {
-            read_rss_pages(&pid_str).unwrap_or(0) * 4 // pages → KB (4KB pages)
-        });
+        // Read PSS — only refresh from /proc every 5 cycles (smaps_rollup is expensive)
+        let pss = if refresh_pss {
+            let val = read_pss_kb(&pid_str).unwrap_or_else(|| {
+                read_rss_pages(&pid_str).unwrap_or(0) * 4 // pages → KB
+            });
+            pss_cache.insert(pid, val);
+            val
+        } else {
+            pss_cache.get(&pid).copied().unwrap_or_else(|| {
+                // First time seeing this PID — must read
+                let val = read_pss_kb(&pid_str).unwrap_or_else(|| {
+                    read_rss_pages(&pid_str).unwrap_or(0) * 4
+                });
+                pss_cache.insert(pid, val);
+                val
+            })
+        };
         total_all_pss += pss;
 
         // Check if this process belongs to a pod
@@ -1076,7 +1109,11 @@ fn enumerate_pods(
 
 /// Clean up stale PIDs from the CPU ticks cache.
 /// Called periodically to prevent unbounded growth.
-fn cleanup_stale_pids(prev_cpu_ticks: &mut HashMap<u32, u64>, prev_page_faults: &mut HashMap<u32, (u64, u64)>) {
+fn cleanup_stale_pids(
+    prev_cpu_ticks: &mut HashMap<u32, u64>,
+    prev_page_faults: &mut HashMap<u32, (u64, u64)>,
+    pss_cache: &mut HashMap<u32, u64>,
+) {
     let active_pids: std::collections::HashSet<u32> = fs::read_dir(procfs_root())
         .map(|entries| {
             entries
@@ -1088,6 +1125,7 @@ fn cleanup_stale_pids(prev_cpu_ticks: &mut HashMap<u32, u64>, prev_page_faults: 
 
     prev_cpu_ticks.retain(|pid, _| active_pids.contains(pid));
     prev_page_faults.retain(|pid, _| active_pids.contains(pid));
+    pss_cache.retain(|pid, _| active_pids.contains(pid));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -1124,7 +1162,7 @@ fn count_processes() -> u32 {
 ///
 /// DCGM metrics include pod name and namespace directly:
 ///   DCGM_FI_DEV_POWER_USAGE{...,namespace="ai-onboard",pod="llama-predictor-xxx",...} 49.157
-fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>) {
+async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, http_client: &reqwest::Client, pod_cache: &HashMap<String, PodInfo>) {
     let dcgm_url = if let Ok(url) = std::env::var("DCGM_EXPORTER_URL") {
         if url.contains(".svc") {
             hardware::gpu::discover_dcgm_url_pub().unwrap_or(url)
@@ -1138,15 +1176,11 @@ fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>) {
         }
     };
 
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
+    let resp = match http_client.get(&dcgm_url).send().await {
+        Ok(r) => r,
         Err(_) => return,
     };
-
-    let body = match client.get(&dcgm_url).send().and_then(|r| r.text()) {
+    let body = match resp.text().await {
         Ok(b) => b,
         Err(_) => return,
     };
@@ -1179,18 +1213,26 @@ fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>) {
             pod.gpu_uw += gpu_uw;
             pod.total_uw = pod.cpu_uw + pod.memory_uw + pod.gpu_uw;
         } else {
-            // Pod not in cgroup scan — add as GPU-only entry
-            pods.push(PodPowerReport {
-                node_name: node_name.to_string(),
-                pod_uid: pod_name.clone(),
-                pod_name,
-                namespace,
-                cpu_uw: 0,
-                memory_uw: 0,
-                gpu_uw: gpu_uw,
-                total_uw: gpu_uw,
-                timestamp: SystemTime::now(),
-            });
+            // Pod not in cgroup scan — look up real UID from K8s API cache
+            let real_uid = pod_cache.iter()
+                .find(|(_, info)| info.name == pod_name && info.namespace == namespace)
+                .map(|(uid, _)| uid.clone());
+
+            if let Some(uid) = real_uid {
+                pods.push(PodPowerReport {
+                    node_name: node_name.to_string(),
+                    pod_uid: uid,
+                    pod_name,
+                    namespace,
+                    cpu_uw: 0,
+                    memory_uw: 0,
+                    gpu_uw: gpu_uw,
+                    total_uw: gpu_uw,
+                    timestamp: SystemTime::now(),
+                });
+            } else {
+                log::debug!("GPU pod {}/{} not in K8s cache — skipping", namespace, pod_name);
+            }
         }
     }
 }

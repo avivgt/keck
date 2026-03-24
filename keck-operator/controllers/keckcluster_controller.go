@@ -4,6 +4,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -38,8 +40,9 @@ type KeckClusterReconciler struct {
 
 // +kubebuilder:rbac:groups=keck.io,resources=keckclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=keck.io,resources=keckclusters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=keck.io,resources=keckclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=daemonsets;deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=namespaces;serviceaccounts;services;configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=namespaces;serviceaccounts;services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
 
 func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -56,10 +59,38 @@ func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logger.Info("Reconciling KeckCluster", "name", keck.Name)
 
-	// Update status to Installing
-	keck.Status.Phase = "Installing"
-	if err := r.Status().Update(ctx, &keck); err != nil {
-		logger.Error(err, "Failed to update status")
+	// Handle deletion — clean up child resources
+	if !keck.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&keck, finalizerName) {
+			logger.Info("Cleaning up Keck resources")
+			if err := r.cleanupResources(ctx, &keck); err != nil {
+				return ctrl.Result{}, fmt.Errorf("cleanup failed: %w", err)
+			}
+
+			controllerutil.RemoveFinalizer(&keck, finalizerName)
+			if err := r.Update(ctx, &keck); err != nil {
+				return ctrl.Result{}, err
+			}
+			logger.Info("Finalizer removed, cleanup complete")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer on first reconcile
+	if !controllerutil.ContainsFinalizer(&keck, finalizerName) {
+		controllerutil.AddFinalizer(&keck, finalizerName)
+		if err := r.Update(ctx, &keck); err != nil {
+			return ctrl.Result{}, err
+		}
+		logger.Info("Finalizer added")
+	}
+
+	// Update status to Installing only on first deploy
+	if keck.Status.Phase == "" {
+		keck.Status.Phase = "Installing"
+		if err := r.Status().Update(ctx, &keck); err != nil {
+			logger.Error(err, "Failed to update status")
+		}
 	}
 
 	// Ensure namespace
@@ -70,6 +101,11 @@ func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Ensure ServiceAccount
 	if err := r.ensureServiceAccount(ctx, &keck); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring service account: %w", err)
+	}
+
+	// Ensure API key secret for agent ↔ controller auth
+	if err := r.ensureAPIKeySecret(ctx, &keck); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensuring API key secret: %w", err)
 	}
 
 	// Ensure RBAC
@@ -98,6 +134,88 @@ func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// cleanupResources deletes all child resources created by the operator.
+// Called when the KeckCluster CR is being deleted (finalizer logic).
+func (r *KeckClusterReconciler) cleanupResources(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
+	logger := log.FromContext(ctx)
+
+	// Delete in reverse creation order: Service → Deployment → DaemonSet → Secret → RBAC → SA → Namespace
+
+	// Controller Service
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-controller", Namespace: keckNamespace}, svc); err == nil {
+		logger.Info("Deleting Service keck-controller")
+		if err := r.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting Service: %w", err)
+		}
+	}
+
+	// Controller Deployment
+	deploy := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-controller", Namespace: keckNamespace}, deploy); err == nil {
+		logger.Info("Deleting Deployment keck-controller")
+		if err := r.Delete(ctx, deploy); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting Deployment: %w", err)
+		}
+	}
+
+	// Agent DaemonSet
+	ds := &appsv1.DaemonSet{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-agent", Namespace: keckNamespace}, ds); err == nil {
+		logger.Info("Deleting DaemonSet keck-agent")
+		if err := r.Delete(ctx, ds); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting DaemonSet: %w", err)
+		}
+	}
+
+	// API key Secret
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-api-key", Namespace: keckNamespace}, secret); err == nil {
+		logger.Info("Deleting Secret keck-api-key")
+		if err := r.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting Secret: %w", err)
+		}
+	}
+
+	// ClusterRoleBinding (cluster-scoped)
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-agent"}, crb); err == nil {
+		logger.Info("Deleting ClusterRoleBinding keck-agent")
+		if err := r.Delete(ctx, crb); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting ClusterRoleBinding: %w", err)
+		}
+	}
+
+	// ClusterRole (cluster-scoped)
+	cr := &rbacv1.ClusterRole{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-agent"}, cr); err == nil {
+		logger.Info("Deleting ClusterRole keck-agent")
+		if err := r.Delete(ctx, cr); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting ClusterRole: %w", err)
+		}
+	}
+
+	// ServiceAccount
+	sa := &corev1.ServiceAccount{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "keck-agent", Namespace: keckNamespace}, sa); err == nil {
+		logger.Info("Deleting ServiceAccount keck-agent")
+		if err := r.Delete(ctx, sa); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting ServiceAccount: %w", err)
+		}
+	}
+
+	// Namespace — delete last, cascades everything inside
+	ns := &corev1.Namespace{}
+	if err := r.Get(ctx, types.NamespacedName{Name: keckNamespace}, ns); err == nil {
+		logger.Info("Deleting Namespace", "namespace", keckNamespace)
+		if err := r.Delete(ctx, ns); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting Namespace: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (r *KeckClusterReconciler) ensureNamespace(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
@@ -134,6 +252,38 @@ func (r *KeckClusterReconciler) ensureServiceAccount(ctx context.Context, keck *
 		return r.Create(ctx, sa)
 	}
 	return err
+}
+
+func (r *KeckClusterReconciler) ensureAPIKeySecret(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
+	secretName := "keck-api-key"
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: keckNamespace}, existing)
+	if err == nil {
+		return nil // Secret already exists — don't regenerate
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	// Generate a random 32-byte API key
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return fmt.Errorf("generating API key: %w", err)
+	}
+	apiKey := hex.EncodeToString(keyBytes)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: keckNamespace,
+			Labels:    commonLabels(),
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"api-key": apiKey,
+		},
+	}
+	return r.Create(ctx, secret)
 }
 
 func (r *KeckClusterReconciler) ensureRBAC(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
@@ -212,6 +362,17 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 		{
 			Name:  "KECK_CONTROLLER_URL",
 			Value: "http://keck-controller.keck-system.svc:8080",
+		},
+		{
+			Name: "KECK_API_KEY",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "keck-api-key",
+					},
+					Key: "api-key",
+				},
+			},
 		},
 	}
 
@@ -382,6 +543,19 @@ func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, 
 							Ports: []corev1.ContainerPort{
 								{Name: "grpc", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
 								{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name: "KECK_API_KEY",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "keck-api-key",
+											},
+											Key: "api-key",
+										},
+									},
+								},
 							},
 							Resources: controllerResources(keck),
 						},

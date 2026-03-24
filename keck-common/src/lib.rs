@@ -144,3 +144,98 @@ pub const MAX_CPU_FREQ_ENTRIES: u32 = 32768;
 
 /// Maximum entries in pid_cgroup map.
 pub const MAX_PID_CGROUP_ENTRIES: u32 = 65536;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem;
+
+    #[test]
+    fn test_pid_cpu_key_size() {
+        // Must be repr(C), so size = 4+4 = 8 bytes
+        assert_eq!(mem::size_of::<PidCpuKey>(), 8);
+    }
+
+    #[test]
+    fn test_pid_cpu_time_size() {
+        assert_eq!(mem::size_of::<PidCpuTime>(), 8);
+    }
+
+    #[test]
+    fn test_cpu_sched_state_size() {
+        // u32 (4) + padding (4) + u64 (8) = 16 bytes (repr(C))
+        assert_eq!(mem::size_of::<CpuSchedState>(), 16);
+    }
+
+    #[test]
+    fn test_cpu_freq_key_size() {
+        assert_eq!(mem::size_of::<CpuFreqKey>(), 8);
+    }
+
+    #[test]
+    fn test_cpu_freq_time_size() {
+        assert_eq!(mem::size_of::<CpuFreqTime>(), 8);
+    }
+
+    #[test]
+    fn test_cpu_freq_state_size() {
+        // u32 (4) + padding (4) + u64 (8) = 16 bytes
+        assert_eq!(mem::size_of::<CpuFreqState>(), 16);
+    }
+
+    #[test]
+    fn test_core_counters_size() {
+        // 4 x u64 = 32 bytes
+        assert_eq!(mem::size_of::<CoreCounters>(), 32);
+    }
+
+    #[test]
+    fn test_pid_cgroup_value_size() {
+        assert_eq!(mem::size_of::<PidCgroupValue>(), 8);
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(MAX_PID_CPU_ENTRIES, 65536);
+        assert_eq!(MAX_CPUS, 1024);
+        assert_eq!(MAX_CPU_FREQ_ENTRIES, 32768);
+        assert_eq!(MAX_PID_CGROUP_ENTRIES, 65536);
+    }
+
+    #[test]
+    fn test_pid_cpu_key_clone() {
+        let key = PidCpuKey { cpu: 3, pid: 42 };
+        let cloned = key;
+        assert_eq!(cloned.cpu, 3);
+        assert_eq!(cloned.pid, 42);
+    }
+
+    #[test]
+    fn test_core_counters_clone() {
+        let counters = CoreCounters {
+            instructions: 1000,
+            cycles: 2000,
+            cache_misses: 50,
+            cache_refs: 500,
+        };
+        let cloned = counters;
+        assert_eq!(cloned.instructions, 1000);
+        assert_eq!(cloned.cycles, 2000);
+        assert_eq!(cloned.cache_misses, 50);
+        assert_eq!(cloned.cache_refs, 500);
+    }
+
+    #[test]
+    fn test_repr_c_layout_pid_cpu_key() {
+        // Verify offsets are stable for BPF interop
+        let key = PidCpuKey { cpu: 0xAABBCCDD, pid: 0x11223344 };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&key as *const _ as *const u8, mem::size_of::<PidCpuKey>())
+        };
+        // cpu comes first in repr(C)
+        let cpu_bytes = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(cpu_bytes, 0xAABBCCDD);
+        let pid_bytes = u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(pid_bytes, 0x11223344);
+    }
+}

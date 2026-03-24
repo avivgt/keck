@@ -138,4 +138,30 @@ impl EbpfObserver {
             pid_cgroups,
         })
     }
+
+    /// Remove PID_CGROUP entries for PIDs that no longer exist.
+    /// Call periodically to prevent the BPF map from filling up.
+    pub fn cleanup_dead_pids(&mut self) -> Result<usize, ObserverError> {
+        let mut map: BpfHashMap<&mut MapData, u32, PidCgroupValue> =
+            BpfHashMap::try_from(self.bpf.map_mut("PID_CGROUP").ok_or_else(|| {
+                ObserverError::Ebpf("PID_CGROUP map not found".into())
+            })?)
+            .map_err(|e| ObserverError::Ebpf(format!("PID_CGROUP cast: {}", e)))?;
+
+        let mut dead_pids = Vec::new();
+        for item in map.iter() {
+            if let Ok((pid, _)) = item {
+                if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                    dead_pids.push(pid);
+                }
+            }
+        }
+
+        let count = dead_pids.len();
+        for pid in &dead_pids {
+            let _ = map.remove(pid);
+        }
+
+        Ok(count)
+    }
 }

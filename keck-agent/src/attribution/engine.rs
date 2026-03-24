@@ -509,3 +509,69 @@ fn energy_to_power(energy_uj: u64, interval_ns: u64) -> u64 {
     // power_uw = energy_uj / interval_s = energy_uj * 1e9 / interval_ns
     ((energy_uj as u128 * 1_000_000_000) / interval_ns as u128) as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── energy_to_power() tests ─────────────────────────────────
+
+    #[test]
+    fn test_energy_to_power_basic() {
+        // 1000 uj over 1 second (1e9 ns) = 1000 uw
+        assert_eq!(energy_to_power(1000, 1_000_000_000), 1000);
+    }
+
+    #[test]
+    fn test_energy_to_power_half_second() {
+        // 1000 uj over 0.5 second = 2000 uw
+        assert_eq!(energy_to_power(1000, 500_000_000), 2000);
+    }
+
+    #[test]
+    fn test_energy_to_power_zero_interval() {
+        assert_eq!(energy_to_power(1000, 0), 0);
+    }
+
+    #[test]
+    fn test_energy_to_power_zero_energy() {
+        assert_eq!(energy_to_power(0, 1_000_000_000), 0);
+    }
+
+    #[test]
+    fn test_energy_to_power_large_values() {
+        // 1_000_000_000 uj over 1 second = 1_000_000_000 uw = 1000 watts
+        let result = energy_to_power(1_000_000_000, 1_000_000_000);
+        assert_eq!(result, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_energy_to_power_no_overflow_with_u128() {
+        // Very large energy that would overflow u64 without u128 intermediate
+        let large_energy = u64::MAX / 2;
+        let interval = 1_000_000_000u64;
+        let result = energy_to_power(large_energy, interval);
+        assert_eq!(result, large_energy); // energy/1s = energy in uw
+    }
+
+    // ─── AttributionEngine tests ─────────────────────────────────
+
+    #[test]
+    fn test_engine_new() {
+        let engine = AttributionEngine::new(8, 2);
+        assert_eq!(engine.num_cores, 8);
+        assert_eq!(engine.cores_per_socket, 4);
+    }
+
+    #[test]
+    fn test_engine_new_single_socket() {
+        let engine = AttributionEngine::new(4, 1);
+        assert_eq!(engine.cores_per_socket, 4);
+    }
+
+    #[test]
+    fn test_engine_new_zero_sockets() {
+        let engine = AttributionEngine::new(4, 0);
+        assert_eq!(engine.cores_per_socket, 4); // Falls back to num_cores
+    }
+}

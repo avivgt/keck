@@ -15,6 +15,7 @@ import {
   Spinner,
   EmptyState,
   EmptyStateBody,
+  ExpandableSection,
 } from "@patternfly/react-core";
 import {
   Table,
@@ -68,9 +69,7 @@ const ClusterOverview: React.FC = () => {
 
       {/* Attribution Methodology */}
       <PageSection>
-        <Card>
-          <CardTitle>How Power is Calculated</CardTitle>
-          <CardBody>
+        <ExpandableSection toggleText="How Power is Calculated" isIndented>
             <div style={{ fontSize: "0.9em", lineHeight: 1.7 }}>
               <p><strong>1. Hardware discovery (vendor-agnostic)</strong></p>
               <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
@@ -149,8 +148,7 @@ const ClusterOverview: React.FC = () => {
                 per-core frequency-weighted attribution.
               </p>
             </div>
-          </CardBody>
-        </Card>
+        </ExpandableSection>
       </PageSection>
 
       <PageSection>

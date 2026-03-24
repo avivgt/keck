@@ -15,11 +15,13 @@ metadata:
 rules:
   # Keck CRDs
   - apiGroups: ["keck.io"]
-    resources: ["*"]
-    verbs: ["*"]
+    resources: ["keckclusters", "keckclusters/status", "keckclusters/finalizers",
+                "powerbudgets", "powerbudgets/status", "powerbudgets/finalizers",
+                "powerprofiles", "powerprofiles/status", "powerprofiles/finalizers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Core resources managed by the operator
   - apiGroups: [""]
-    resources: ["namespaces", "serviceaccounts", "services", "configmaps"]
+    resources: ["namespaces", "serviceaccounts", "services", "configmaps", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Workload resources
   - apiGroups: ["apps"]

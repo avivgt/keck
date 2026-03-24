@@ -182,8 +182,10 @@ pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
         return Err(SourceError::Unavailable("REDFISH_ENDPOINT or REDFISH_MAP not set".into()));
     };
 
-    let username = std::env::var("REDFISH_USERNAME").unwrap_or_else(|_| "root".into());
-    let password = std::env::var("REDFISH_PASSWORD").unwrap_or_else(|_| "calvin".into());
+    let username = std::env::var("REDFISH_USERNAME")
+        .map_err(|_| SourceError::Unavailable("REDFISH_USERNAME not set".into()))?;
+    let password = std::env::var("REDFISH_PASSWORD")
+        .map_err(|_| SourceError::Unavailable("REDFISH_PASSWORD not set".into()))?;
 
     let client = reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)

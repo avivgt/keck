@@ -197,3 +197,188 @@ pub fn select_model(
         _ => Box::new(CpuTimeRatioModel),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obs(pid: u32, time_ns: u64, instructions: u64, cycles: u64, cache_misses: u64) -> PidCoreObservation {
+        PidCoreObservation { pid, time_ns, instructions, cycles, cache_misses }
+    }
+
+    // ─── select_model() tests ────────────────────────────────────
+
+    #[test]
+    fn test_select_model_full() {
+        let model = select_model(true, true);
+        assert_eq!(model.method(), AttributionMethod::FullModel);
+    }
+
+    #[test]
+    fn test_select_model_freq_weighted() {
+        let model = select_model(true, false);
+        assert_eq!(model.method(), AttributionMethod::FrequencyWeighted);
+    }
+
+    #[test]
+    fn test_select_model_cpu_time_ratio_no_data() {
+        let model = select_model(false, false);
+        assert_eq!(model.method(), AttributionMethod::CpuTimeRatio);
+    }
+
+    #[test]
+    fn test_select_model_counters_without_freq_falls_back() {
+        // counters=true, freq=false => CpuTimeRatio (needs both for FullModel)
+        let model = select_model(false, true);
+        assert_eq!(model.method(), AttributionMethod::FrequencyWeighted);
+    }
+
+    // ─── CpuTimeRatioModel tests ─────────────────────────────────
+
+    #[test]
+    fn test_cpu_time_ratio_proportional() {
+        let model = CpuTimeRatioModel;
+        let observations = vec![
+            obs(100, 1000, 0, 0, 0),
+            obs(200, 3000, 0, 0, 0),
+        ];
+
+        let weights = model.compute_weights(&observations, 2_000_000);
+        assert_eq!(weights.len(), 2);
+
+        let total: f64 = weights.iter().map(|w| w.raw_weight).sum();
+        let ratio_100 = weights[0].raw_weight / total;
+        let ratio_200 = weights[1].raw_weight / total;
+
+        assert!((ratio_100 - 0.25).abs() < 1e-10); // 1000/4000
+        assert!((ratio_200 - 0.75).abs() < 1e-10); // 3000/4000
+    }
+
+    #[test]
+    fn test_cpu_time_ratio_ignores_frequency() {
+        let model = CpuTimeRatioModel;
+        let observations = vec![obs(100, 1000, 0, 0, 0)];
+
+        let w1 = model.compute_weights(&observations, 1_000_000);
+        let w2 = model.compute_weights(&observations, 3_000_000);
+
+        assert_eq!(w1[0].raw_weight, w2[0].raw_weight);
+    }
+
+    #[test]
+    fn test_cpu_time_ratio_empty() {
+        let model = CpuTimeRatioModel;
+        let weights = model.compute_weights(&[], 2_000_000);
+        assert!(weights.is_empty());
+    }
+
+    // ─── FrequencyWeightedModel tests ────────────────────────────
+
+    #[test]
+    fn test_freq_weighted_scales_with_frequency() {
+        let model = FrequencyWeightedModel;
+        let observations = vec![obs(100, 1000, 0, 0, 0)];
+
+        let w_low = model.compute_weights(&observations, 1_000_000);  // 1 GHz
+        let w_high = model.compute_weights(&observations, 2_000_000); // 2 GHz
+
+        // At 2GHz, freq_factor = (2e6/1e6)^2 = 4.0
+        // At 1GHz, freq_factor = (1e6/1e6)^2 = 1.0
+        assert!((w_high[0].raw_weight / w_low[0].raw_weight - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_freq_weighted_proportional_by_time() {
+        let model = FrequencyWeightedModel;
+        let observations = vec![
+            obs(100, 1000, 0, 0, 0),
+            obs(200, 2000, 0, 0, 0),
+        ];
+
+        let weights = model.compute_weights(&observations, 2_000_000);
+        let total: f64 = weights.iter().map(|w| w.raw_weight).sum();
+        let ratio = weights[0].raw_weight / total;
+        assert!((ratio - 1.0 / 3.0).abs() < 1e-10);
+    }
+
+    // ─── FullModel tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_full_model_ipc_effect() {
+        let model = FullModel::new();
+        // Process A: high IPC (compute-intensive)
+        let obs_high_ipc = vec![obs(100, 1000, 2000, 1000, 0)]; // IPC=2.0
+        // Process B: low IPC (memory-bound)
+        let obs_low_ipc = vec![obs(200, 1000, 500, 1000, 0)]; // IPC=0.5
+
+        let w_high = model.compute_weights(&obs_high_ipc, 2_000_000);
+        let w_low = model.compute_weights(&obs_low_ipc, 2_000_000);
+
+        // Higher IPC should produce higher weight (more compute work done)
+        assert!(w_high[0].raw_weight > w_low[0].raw_weight);
+    }
+
+    #[test]
+    fn test_full_model_cache_miss_effect() {
+        let model = FullModel::new();
+        // Process A: lots of cache misses (memory-heavy)
+        let obs_missy = vec![obs(100, 1000, 10000, 10000, 5000)];
+        // Process B: few cache misses
+        let obs_no_miss = vec![obs(200, 1000, 10000, 10000, 0)];
+
+        let w_missy = model.compute_weights(&obs_missy, 2_000_000);
+        let w_clean = model.compute_weights(&obs_no_miss, 2_000_000);
+
+        // More cache misses => higher weight (more power consumed)
+        assert!(w_missy[0].raw_weight > w_clean[0].raw_weight);
+    }
+
+    #[test]
+    fn test_full_model_zero_cycles() {
+        let model = FullModel::new();
+        let observations = vec![obs(100, 1000, 500, 0, 10)]; // cycles=0
+        let weights = model.compute_weights(&observations, 2_000_000);
+        // Should not panic, IPC falls back to 0
+        assert!(weights[0].raw_weight > 0.0);
+    }
+
+    #[test]
+    fn test_full_model_zero_instructions() {
+        let model = FullModel::new();
+        let observations = vec![obs(100, 1000, 0, 1000, 10)]; // instructions=0
+        let weights = model.compute_weights(&observations, 2_000_000);
+        // miss_rate = 0 (guarded by instructions > 0)
+        assert!(weights[0].raw_weight > 0.0);
+    }
+
+    // ─── Energy conservation property ────────────────────────────
+
+    #[test]
+    fn test_weights_sum_enables_conservation() {
+        // After normalization: sum(pid_energy) = core_energy
+        // Here we verify the weights are non-negative and sum > 0
+        let model = select_model(true, true);
+        let observations = vec![
+            obs(100, 5000, 10000, 8000, 200),
+            obs(200, 3000, 6000, 4000, 100),
+            obs(300, 2000, 3000, 2000, 50),
+        ];
+
+        let weights = model.compute_weights(&observations, 2_500_000);
+        let total: f64 = weights.iter().map(|w| w.raw_weight).sum();
+        assert!(total > 0.0);
+        for w in &weights {
+            assert!(w.raw_weight >= 0.0);
+        }
+
+        // Simulate normalization with 100_000 uj core energy
+        let core_energy = 100_000u64;
+        let mut pid_energy_sum = 0u64;
+        for w in &weights {
+            let ratio = w.raw_weight / total;
+            pid_energy_sum += (core_energy as f64 * ratio) as u64;
+        }
+        // Due to integer rounding, may differ by a few uj
+        assert!((pid_energy_sum as i64 - core_energy as i64).unsigned_abs() <= weights.len() as u64);
+    }
+}

@@ -193,6 +193,77 @@ impl CarbonTracker {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tracker_with_intensity(grams: f64) -> CarbonTracker {
+        let mut tracker = CarbonTracker::new();
+        tracker.current_intensity = Some(CarbonIntensity {
+            grams_co2_per_kwh: grams,
+            source: "test".into(),
+            region: "test-region".into(),
+            timestamp: SystemTime::now(),
+            is_forecast: false,
+        });
+        tracker
+    }
+
+    #[test]
+    fn test_new_tracker_no_intensity() {
+        let tracker = CarbonTracker::new();
+        assert!(tracker.current().is_none());
+    }
+
+    #[test]
+    fn test_calculate_without_intensity_returns_none() {
+        let tracker = CarbonTracker::new();
+        assert!(tracker.calculate(1_000_000, Duration::from_secs(3600)).is_none());
+    }
+
+    #[test]
+    fn test_calculate_basic() {
+        let tracker = make_tracker_with_intensity(400.0);
+        // 1W for 1 hour = 0.001 kWh, at 400 gCO2/kWh = 0.4 grams
+        let report = tracker.calculate(1_000_000, Duration::from_secs(3600)).unwrap();
+
+        assert!((report.power_watts - 1.0).abs() < 1e-10);
+        assert!((report.energy_wh - 1.0).abs() < 1e-10);
+        assert!((report.carbon_grams - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_calculate_cost() {
+        let tracker = make_tracker_with_intensity(400.0);
+        // 1000W for 1 hour = 1 kWh, at $0.10/kWh = $0.10
+        let report = tracker.calculate(1_000_000_000, Duration::from_secs(3600)).unwrap();
+
+        assert!((report.power_watts - 1000.0).abs() < 1e-6);
+        assert!((report.energy_wh - 1000.0).abs() < 1e-6);
+        assert!((report.cost - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_calculate_annualization() {
+        let tracker = make_tracker_with_intensity(400.0);
+        // 1kW for 1 hour, annualized
+        let report = tracker.calculate(1_000_000_000, Duration::from_secs(3600)).unwrap();
+
+        // 8766 hours/year (365.25 * 24)
+        let expected_cost_per_year = 0.10 * 8766.0;
+        assert!((report.cost_per_year - expected_cost_per_year).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_calculate_zero_power() {
+        let tracker = make_tracker_with_intensity(400.0);
+        let report = tracker.calculate(0, Duration::from_secs(3600)).unwrap();
+        assert_eq!(report.power_watts, 0.0);
+        assert_eq!(report.carbon_grams, 0.0);
+        assert_eq!(report.cost, 0.0);
+    }
+}
+
 /// Background task that periodically refreshes carbon intensity data.
 pub async fn run_updater(carbon: std::sync::Arc<tokio::sync::RwLock<CarbonTracker>>) {
     loop {

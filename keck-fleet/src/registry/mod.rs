@@ -352,3 +352,190 @@ impl ClusterRegistry {
             .retain(|_, state| state.received_at.elapsed() < threshold);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cluster_report(id: &str, name: &str, region: &str, total_watts: f64, carbon_intensity: f64) -> ClusterReport {
+        ClusterReport {
+            cluster_id: id.into(),
+            cluster_name: name.into(),
+            region: region.into(),
+            provider: "bare-metal".into(),
+            power: ClusterPowerSummary {
+                total_watts,
+                cpu_watts: total_watts * 0.6,
+                memory_watts: total_watts * 0.2,
+                gpu_watts: total_watts * 0.1,
+                idle_watts: total_watts * 0.1,
+                platform_watts: Some(total_watts * 1.2),
+            },
+            namespaces: vec![
+                NamespaceSummary { namespace: "prod".into(), total_watts: total_watts * 0.7, pod_count: 10 },
+                NamespaceSummary { namespace: "staging".into(), total_watts: total_watts * 0.3, pod_count: 5 },
+            ],
+            carbon: CarbonData {
+                intensity_grams_per_kwh: carbon_intensity,
+                emissions_grams_per_hour: total_watts / 1000.0 * carbon_intensity,
+                cost_per_kwh: 0.10,
+                currency: "USD".into(),
+            },
+            node_count: 3,
+            pod_count: 15,
+            avg_error_ratio: 0.05,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_registry_new_empty() {
+        let reg = ClusterRegistry::new();
+        let summary = reg.fleet_summary();
+        assert_eq!(summary.cluster_count, 0);
+        assert_eq!(summary.total_watts, 0.0);
+    }
+
+    #[test]
+    fn test_ingest_single_cluster() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 1000.0, 400.0));
+
+        let summary = reg.fleet_summary();
+        assert_eq!(summary.cluster_count, 1);
+        assert!((summary.total_watts - 1000.0).abs() < 1e-6);
+        assert_eq!(summary.total_nodes, 3);
+        assert_eq!(summary.total_pods, 15);
+    }
+
+    #[test]
+    fn test_ingest_multiple_clusters() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 1000.0, 400.0));
+        reg.ingest(make_cluster_report("c2", "prod-eu", "eu-west-1", 500.0, 200.0));
+
+        let summary = reg.fleet_summary();
+        assert_eq!(summary.cluster_count, 2);
+        assert!((summary.total_watts - 1500.0).abs() < 1e-6);
+        assert_eq!(summary.total_nodes, 6);
+        assert_eq!(summary.total_pods, 30);
+    }
+
+    #[test]
+    fn test_ingest_updates_existing_cluster() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 1000.0, 400.0));
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 2000.0, 400.0));
+
+        let summary = reg.fleet_summary();
+        assert_eq!(summary.cluster_count, 1);
+        assert!((summary.total_watts - 2000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_fleet_summary_sorted_by_power() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "low", "us-east-1", 100.0, 400.0));
+        reg.ingest(make_cluster_report("c2", "high", "eu-west-1", 5000.0, 200.0));
+        reg.ingest(make_cluster_report("c3", "mid", "ap-south-1", 1000.0, 600.0));
+
+        let summary = reg.fleet_summary();
+        assert_eq!(summary.clusters[0].cluster_name, "high");
+        assert_eq!(summary.clusters[1].cluster_name, "mid");
+        assert_eq!(summary.clusters[2].cluster_name, "low");
+    }
+
+    #[test]
+    fn test_fleet_summary_cost_calculation() {
+        let mut reg = ClusterRegistry::new();
+        // 1000W at $0.10/kWh => cost_per_hour = 1kW * $0.10 = $0.10/hour
+        reg.ingest(make_cluster_report("c1", "prod", "us-east-1", 1000.0, 400.0));
+
+        let summary = reg.fleet_summary();
+        assert!((summary.total_cost_per_hour - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_team_power_with_owners() {
+        let mut reg = ClusterRegistry::new();
+        reg.set_namespace_owner("prod", "team-a");
+        reg.set_namespace_owner("staging", "team-b");
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 1000.0, 400.0));
+
+        let teams = reg.team_power();
+        assert_eq!(teams.len(), 2);
+        // Teams should be sorted by total_watts desc
+        let team_a = teams.iter().find(|t| t.team == "team-a").unwrap();
+        let team_b = teams.iter().find(|t| t.team == "team-b").unwrap();
+        assert!(team_a.total_watts > team_b.total_watts);
+    }
+
+    #[test]
+    fn test_team_power_unassigned() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 1000.0, 400.0));
+
+        let teams = reg.team_power();
+        // All namespaces should be "unassigned"
+        for team in &teams {
+            assert_eq!(team.team, "unassigned");
+        }
+    }
+
+    #[test]
+    fn test_lowest_carbon_cluster() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "dirty", "us-east-1", 1000.0, 600.0));
+        reg.ingest(make_cluster_report("c2", "clean", "eu-west-1", 1000.0, 100.0));
+        reg.ingest(make_cluster_report("c3", "medium", "ap-south-1", 1000.0, 300.0));
+
+        let lowest = reg.lowest_carbon_cluster().unwrap();
+        assert_eq!(lowest.cluster_name, "clean");
+        assert!((lowest.carbon.intensity_grams_per_kwh - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_lowest_carbon_cluster_empty() {
+        let reg = ClusterRegistry::new();
+        assert!(reg.lowest_carbon_cluster().is_none());
+    }
+
+    #[test]
+    fn test_active_clusters() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "prod", "us-east-1", 1000.0, 400.0));
+
+        let active = reg.active_clusters();
+        assert_eq!(active.len(), 1);
+    }
+
+    #[test]
+    fn test_cluster_power_history() {
+        let mut reg = ClusterRegistry::new();
+        reg.ingest(make_cluster_report("c1", "prod", "us-east-1", 1000.0, 400.0));
+        reg.ingest(make_cluster_report("c1", "prod", "us-east-1", 1500.0, 400.0));
+
+        let since = Utc::now() - chrono::Duration::seconds(60);
+        let history = reg.cluster_power_history("c1", since);
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn test_cluster_power_history_nonexistent() {
+        let reg = ClusterRegistry::new();
+        let since = Utc::now() - chrono::Duration::seconds(60);
+        assert!(reg.cluster_power_history("nonexistent", since).is_empty());
+    }
+
+    #[test]
+    fn test_set_namespace_owner() {
+        let mut reg = ClusterRegistry::new();
+        reg.set_namespace_owner("prod", "platform-team");
+
+        // Verify via team_power after ingesting data
+        reg.ingest(make_cluster_report("c1", "prod-us", "us-east-1", 1000.0, 400.0));
+        let teams = reg.team_power();
+        let platform = teams.iter().find(|t| t.team == "platform-team");
+        assert!(platform.is_some());
+    }
+}
