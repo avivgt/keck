@@ -183,6 +183,10 @@ cd keck-operator && make build
 
 ## Deployment
 
+For detailed step-by-step OpenShift deployment instructions (building images
+on OCP, installing via OLM, deploying the console plugin), see
+**[docs/openshift-deployment.md](docs/openshift-deployment.md)**.
+
 ### Option 1: OpenShift / OLM (Recommended for Production)
 
 The Keck operator follows the Red Hat Operator Lifecycle Manager (OLM)
