@@ -1,0 +1,11 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: keck-operator
+  namespace: openshift-operators
+spec:
+  channel: alpha
+  name: keck-operator
+  source: keck-operator-catalog
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

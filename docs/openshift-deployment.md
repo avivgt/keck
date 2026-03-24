@@ -172,13 +172,46 @@ oc get imagestreams -n keck-system
 
 ## Step 3: Install the Operator
 
-### 3.1 Install CRDs
+You have two options:
+
+- **Option A (Recommended):** Install via the OpenShift UI (OperatorHub) — see Step 3A
+- **Option B:** Install manually via CLI — see Step 3B
+
+### Step 3A: Install via OperatorHub (UI)
+
+This makes the Keck Operator appear in **Operators → OperatorHub** so you
+can install it by clicking "Install" in the console.
+
+Run the automated script:
+
+```bash
+bash keck-operator/config/olm/install-via-ui.sh
+```
+
+This will:
+1. Build the operator, bundle, and catalog images on OCP
+2. Create a CatalogSource in `openshift-marketplace`
+3. Make "Keck Operator" available in OperatorHub
+
+Then in the OpenShift console:
+1. Go to **Operators → OperatorHub**
+2. Search for **"Keck"**
+3. Click **Keck Operator** → **Install**
+4. Choose the namespace and click **Install**
+5. After installation, go to **Operators → Installed Operators → Keck Operator**
+6. Click **Create KeckCluster** to deploy agents and controller
+
+Skip to **Step 4** after installing.
+
+### Step 3B: Install Manually (CLI)
+
+#### 3B.1 Install CRDs
 
 ```bash
 oc apply -f keck-operator/config/crd/bases/
 ```
 
-### 3.2 Install RBAC
+#### 3B.2 Install RBAC
 
 ```bash
 oc apply -f keck-operator/config/rbac/role.yaml
@@ -191,7 +224,7 @@ oc patch clusterrole keck-operator --type=json -p='[
 ]'
 ```
 
-### 3.3 Deploy the Operator
+#### 3B.3 Deploy the Operator
 
 Update the manager manifest to use the internal registry image:
 
@@ -214,7 +247,7 @@ oc policy add-role-to-user system:image-puller \
   -n keck-system
 ```
 
-### 3.4 Register with OLM (Installed Operators)
+#### 3B.4 Register with OLM (Installed Operators)
 
 To make Keck appear in the OpenShift console under Installed Operators:
 
@@ -240,7 +273,7 @@ sed "s|namespace: placeholder|namespace: keck-system|; \
   oc apply -n keck-system -f -
 ```
 
-### 3.5 Verify Operator
+#### 3B.5 Verify Operator
 
 ```bash
 oc get csv -n keck-system | grep keck
