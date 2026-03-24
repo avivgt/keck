@@ -102,9 +102,8 @@ rm -rf "$TMPDIR"
 
 ### 2.3 Build the Agent
 
-The agent needs `keck-common` and `keck-agent`. The eBPF build is stubbed
-out for now (eBPF programs will be compiled separately when the full
-toolchain is integrated):
+The agent needs `keck-common`, `keck-ebpf`, and `keck-agent`.
+eBPF programs are compiled via aya-build during the cargo build:
 
 ```bash
 # Prepare build context
