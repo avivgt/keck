@@ -30,7 +30,7 @@ metadata:
       ]
     capabilities: Full Lifecycle
     categories: Monitoring
-    containerImage: ghcr.io/avivgt/keck-operator:0.1.0
+    containerImage: quay.io/aguetta/keck-operator:0.1.0
     createdAt: "2026-03-21T00:00:00Z"
     description: Accurate per-workload power metering for Kubernetes and OpenShift.
     operators.operatorframework.io/builder: operator-sdk-v1.38.0
@@ -238,7 +238,7 @@ spec:
                   runAsNonRoot: true
                 containers:
                   - name: manager
-                    image: ghcr.io/avivgt/keck-operator:0.1.0
+                    image: quay.io/aguetta/keck-operator:0.1.0
                     command: ["/manager"]
                     args:
                       - --leader-elect

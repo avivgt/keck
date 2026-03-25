@@ -43,7 +43,7 @@ cp -r "$OPERATOR_DIR/bundle" "$TMPDIR/"
 cp "$OPERATOR_DIR/bundle.Dockerfile" "$TMPDIR/Dockerfile"
 
 # Replace the operator image in the CSV deployment
-sed -i.bak "s|ghcr.io/avivgt/keck-operator:0.1.0|${OPERATOR_IMAGE}|g" \
+sed -i.bak "s|quay.io/aguetta/keck-operator:0.1.0|${OPERATOR_IMAGE}|g" \
   "$TMPDIR/bundle/manifests/keck-operator.clusterserviceversion.yaml"
 sed -i.bak "s|namespace: placeholder|namespace: ${NAMESPACE}|g" \
   "$TMPDIR/bundle/manifests/keck-operator.clusterserviceversion.yaml"

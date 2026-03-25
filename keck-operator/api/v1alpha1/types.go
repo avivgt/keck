@@ -114,7 +114,7 @@ type ControllerSpec struct {
 
 type ImageSpec struct {
 	// Container image repository
-	// +kubebuilder:default="ghcr.io/avivgt/keck"
+	// +kubebuilder:default="quay.io/aguetta/keck"
 	Repository string `json:"repository,omitempty"`
 
 	// Image tag

@@ -15,7 +15,7 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: ghcr.io/avivgt/keck-catalog:latest
+  image: quay.io/aguetta/keck-catalog:latest
   displayName: Keck Power Management
   publisher: Keck Project
   updateStrategy:

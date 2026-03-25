@@ -133,7 +133,7 @@ spec:
                   properties:
                     repository:
                       type: string
-                      default: ghcr.io/avivgt/keck
+                      default: quay.io/aguetta/keck
                     tag:
                       type: string
                       default: latest

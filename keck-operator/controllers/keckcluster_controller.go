@@ -670,7 +670,7 @@ func imageRepo(keck *keckv1alpha1.KeckCluster) string {
 	if keck.Spec.Image.Repository != "" {
 		return keck.Spec.Image.Repository
 	}
-	return "ghcr.io/avivgt/keck"
+	return "quay.io/aguetta/keck"
 }
 
 func imageTag(keck *keckv1alpha1.KeckCluster) string {

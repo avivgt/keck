@@ -1,9 +1,9 @@
 # Keck Operator Makefile
 # Follows Red Hat operator-sdk conventions for build, bundle, and catalog.
 
-IMG ?= ghcr.io/avivgt/keck-operator:$(VERSION)
-BUNDLE_IMG ?= ghcr.io/avivgt/keck-operator-bundle:v$(VERSION)
-CATALOG_IMG ?= ghcr.io/avivgt/keck-operator-catalog:v$(VERSION)
+IMG ?= quay.io/aguetta/keck-operator:$(VERSION)
+BUNDLE_IMG ?= quay.io/aguetta/keck-operator-bundle:v$(VERSION)
+CATALOG_IMG ?= quay.io/aguetta/keck-operator-catalog:v$(VERSION)
 VERSION ?= 0.1.0
 
 # Container tool: podman (Red Hat default), falls back to docker
