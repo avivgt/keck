@@ -213,7 +213,7 @@ The Keck operator follows the Red Hat Operator Lifecycle Manager (OLM)
 standard. Use the quick install above, or build from source:
 
 ```bash
-# Build and push operator, bundle, and catalog images to ghcr.io
+# Build and push operator, bundle, and catalog images to quay.io
 ./scripts/release.sh 0.1.0
 
 # Users then install via: oc apply -f install.yaml
@@ -237,7 +237,7 @@ spec:
     carbonRegion: "US-CAL-CISO"
     energyCostPerKWh: "0.10"
   image:
-    repository: ghcr.io/avivgt/keck
+    repository: quay.io/aguetta/keck
     tag: latest
 ```
 

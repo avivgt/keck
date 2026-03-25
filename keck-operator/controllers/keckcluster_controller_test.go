@@ -45,7 +45,7 @@ func newKeckCluster(name string) *keckv1alpha1.KeckCluster {
 				Replicas: 1,
 			},
 			Image: keckv1alpha1.ImageSpec{
-				Repository: "ghcr.io/avivgt/keck",
+				Repository: "quay.io/aguetta/keck",
 				Tag:        "v0.1.0",
 				PullPolicy: corev1.PullIfNotPresent,
 			},
@@ -92,7 +92,7 @@ func TestHelperFunctions(t *testing.T) {
 		keck := newKeckCluster("test")
 		keck.Spec.Image.Repository = ""
 		repo := imageRepo(keck)
-		if repo != "ghcr.io/avivgt/keck" {
+		if repo != "quay.io/aguetta/keck" {
 			t.Errorf("expected default repo, got %s", repo)
 		}
 	})

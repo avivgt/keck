@@ -268,7 +268,7 @@ OPERATOR_IMAGE=$(oc get istag keck-operator:latest -n keck-system \
   -o jsonpath='{.image.dockerImageReference}')
 
 sed "s|namespace: placeholder|namespace: keck-system|; \
-     s|ghcr.io/avivgt/keck-operator:0.1.0|${OPERATOR_IMAGE}|g" \
+     s|quay.io/aguetta/keck-operator:0.1.0|${OPERATOR_IMAGE}|g" \
   keck-operator/bundle/manifests/keck-operator.clusterserviceversion.yaml | \
   oc apply -n keck-system -f -
 ```

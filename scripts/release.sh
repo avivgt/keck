@@ -1,8 +1,8 @@
 #!/bin/bash
-# Build and push all Keck images to ghcr.io for public consumption.
+# Build and push all Keck images to quay.io for public consumption.
 #
 # Prerequisites:
-#   - podman or docker logged in to ghcr.io
+#   - podman or docker logged in to quay.io
 #   - opm CLI installed (for catalog build)
 #
 # Usage:
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 VERSION="${1:-0.1.0}"
-REGISTRY="ghcr.io/avivgt"
+REGISTRY="quay.io/aguetta"
 CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
 
 OPERATOR_IMG="${REGISTRY}/keck-operator:v${VERSION}"
@@ -42,7 +42,7 @@ echo "--- 2/4: Bundle image ---"
 TMPDIR=$(mktemp -d)
 cp -r bundle "$TMPDIR/"
 cp bundle.Dockerfile "$TMPDIR/Dockerfile"
-sed -i "s|ghcr.io/avivgt/keck-operator:0.1.0|${OPERATOR_IMG}|g" \
+sed -i "s|quay.io/aguetta/keck-operator:0.1.0|${OPERATOR_IMG}|g" \
   "$TMPDIR/bundle/manifests/keck-operator.clusterserviceversion.yaml"
 
 cd "$TMPDIR"
