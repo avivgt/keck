@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_cpu_ticks: HashMap<u32, u64> = HashMap::new();
     let mut prev_page_faults: HashMap<u32, (u64, u64)> = HashMap::new(); // (minflt, majflt)
     let mut pss_cache: HashMap<u32, u64> = HashMap::new(); // pid → PSS in KB (refreshed every 5 cycles)
-    let mut tick_count: u32 = 0;
+    let mut tick_count: u64 = 0;
 
     // Pod metadata cache: uid → (name, namespace)
     let mut pod_cache: HashMap<String, PodInfo> = HashMap::new();
