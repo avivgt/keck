@@ -1,14 +1,12 @@
 # Build stage: Rust nightly with eBPF toolchain
-FROM rust:latest AS builder
+FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
 
-# Install nightly toolchain and BPF target
-RUN rustup toolchain install nightly --component rust-src
-RUN rustup default nightly
-
-# Install build dependencies for eBPF
-RUN apt-get update && apt-get install -y \
-    clang llvm libelf-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install Rust, nightly toolchain, and eBPF build dependencies
+RUN dnf install -y gcc gcc-c++ make clang llvm elfutils-libelf-devel curl && \
+    dnf clean all
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup component add rust-src --toolchain nightly
 RUN cargo install bpf-linker
 
 WORKDIR /build
