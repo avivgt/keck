@@ -101,7 +101,7 @@ spec:
                                 description: Node serial number (from /sys/class/dmi/id/product_serial).
                               endpoint:
                                 type: string
-                                description: BMC/iDRAC URL (e.g., https://192.168.52.172).
+                                description: BMC/iDRAC URL (e.g., https://10.0.0.1).
                             required: [serial, endpoint]
                       required: [credentialsSecret, nodeBMCMap]
                 controller:

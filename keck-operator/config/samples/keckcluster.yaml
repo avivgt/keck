@@ -30,7 +30,7 @@ spec:
     replicas: 1
 
   image:
-    repository: quay.io/aguetta/keck
+    repository: quay.io/aguetta
     tag: latest
     pullPolicy: IfNotPresent
 
@@ -45,4 +45,4 @@ metadata:
 type: Opaque
 stringData:
   username: root
-  password: calvin
+  password: YOUR_BMC_PASSWORD

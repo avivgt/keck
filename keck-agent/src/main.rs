@@ -1161,7 +1161,7 @@ fn count_processes() -> u32 {
 /// Add per-pod GPU power from DCGM exporter metrics.
 ///
 /// DCGM metrics include pod name and namespace directly:
-///   DCGM_FI_DEV_POWER_USAGE{...,namespace="ai-onboard",pod="llama-predictor-xxx",...} 49.157
+///   DCGM_FI_DEV_POWER_USAGE{...,namespace="default",pod="gpu-workload-xxx",...} 49.157
 async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, http_client: &reqwest::Client, pod_cache: &HashMap<String, PodInfo>) {
     let dcgm_url = if let Ok(url) = std::env::var("DCGM_EXPORTER_URL") {
         if url.contains(".svc") {
