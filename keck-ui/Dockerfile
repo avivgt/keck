@@ -1,5 +1,5 @@
 # Build stage
-FROM node:22-alpine AS builder
+FROM registry.access.redhat.com/ubi9/nodejs-22:latest AS builder
 WORKDIR /app
 COPY package.json ./
 RUN npm install
