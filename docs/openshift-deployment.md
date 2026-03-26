@@ -250,53 +250,111 @@ Or from CLI:
 oc apply -f keck-operator/config/samples/keckcluster.yaml
 ```
 
-### 4.3 Point Agent and Controller to Internal Images
+### 4.3 Set Agent and Controller Images
 
-The operator creates the DaemonSet and Deployment with default image
-references. Update them to use the images built on the cluster:
+The operator creates workloads with Quay image references. If you built
+images on the cluster instead, point to them:
 
 ```bash
-# Controller
-CONTROLLER_IMAGE=$(oc get istag keck-controller:latest -n keck-system \
-  -o jsonpath='{.image.dockerImageReference}')
-oc set image deployment/keck-controller \
-  keck-controller="$CONTROLLER_IMAGE" \
-  -n keck-system
+# Use Quay images (default)
+oc set image ds/keck-agent keck-agent=quay.io/aguetta/keck-agent:latest -n keck-system
+oc set image deploy/keck-controller keck-controller=quay.io/aguetta/keck-controller:latest -n keck-system
 
-# Agent
-AGENT_IMAGE=$(oc get istag keck-agent:latest -n keck-system \
-  -o jsonpath='{.image.dockerImageReference}')
-oc set image daemonset/keck-agent \
-  keck-agent="$AGENT_IMAGE" \
-  -n keck-system
+# Or use internally built images
+# oc set image ds/keck-agent keck-agent=$(oc get istag keck-agent:latest -n keck-system -o jsonpath='{.image.dockerImageReference}') -n keck-system
+# oc set image deploy/keck-controller keck-controller=$(oc get istag keck-controller:latest -n keck-system -o jsonpath='{.image.dockerImageReference}') -n keck-system
 
-# Restart agent to pick up SCC + image
-oc rollout restart daemonset/keck-agent -n keck-system
+oc rollout restart ds/keck-agent -n keck-system
 ```
 
-### 4.4 Deploy the Power Management Console Plugin
+### 4.4 Add TLS Sidecar to Controller
+
+The console plugin proxy requires TLS. Add an nginx TLS sidecar:
+
+```bash
+# Generate serving cert
+oc annotate svc keck-controller -n keck-system \
+  service.beta.openshift.io/serving-cert-secret-name=keck-controller-tls
+
+# Create nginx config
+oc create configmap keck-controller-nginx -n keck-system --from-literal=nginx.conf='
+pid /tmp/nginx.pid;
+worker_processes 1;
+events { worker_connections 1024; }
+http {
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    fastcgi_temp_path /tmp/fastcgi;
+    uwsgi_temp_path /tmp/uwsgi;
+    scgi_temp_path /tmp/scgi;
+    server {
+        listen 9443 ssl;
+        ssl_certificate /etc/tls/tls.crt;
+        ssl_certificate_key /etc/tls/tls.key;
+        location / {
+            proxy_pass http://localhost:8080;
+        }
+    }
+}
+'
+
+# Add sidecar + volumes
+oc patch deploy keck-controller -n keck-system --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/containers/-","value":{
+    "name":"tls-proxy",
+    "image":"nginxinc/nginx-unprivileged:alpine",
+    "command":["nginx","-g","daemon off;"],
+    "ports":[{"containerPort":9443}],
+    "volumeMounts":[
+      {"name":"tls","mountPath":"/etc/tls","readOnly":true},
+      {"name":"nginx-conf","mountPath":"/etc/nginx/nginx.conf","subPath":"nginx.conf","readOnly":true}
+    ]
+  }},
+  {"op":"add","path":"/spec/template/spec/volumes","value":[
+    {"name":"tls","secret":{"secretName":"keck-controller-tls"}},
+    {"name":"nginx-conf","configMap":{"name":"keck-controller-nginx"}}
+  ]}
+]'
+
+# Add HTTPS port to service
+oc patch svc keck-controller -n keck-system --type=json -p '[
+  {"op":"add","path":"/spec/ports/-","value":{"name":"https","port":9443,"targetPort":9443,"protocol":"TCP"}}
+]'
+```
+
+### 4.5 Deploy the Power Management Console Plugin
 
 The UI integrates directly into the OpenShift console as "Power Management"
 in the left navigation. No separate URL or route needed.
 
 ```bash
-# Get the plugin image reference
-UI_IMAGE=$(oc get istag keck-power-management:latest -n keck-system \
-  -o jsonpath='{.image.dockerImageReference}')
+# Build UI
+oc new-build --name=keck-power-management --binary --strategy=docker -n keck-system
+oc start-build keck-power-management --from-dir=keck-ui --follow -n keck-system
 
 # Deploy the plugin (Deployment + Service + ConsolePlugin CR)
 oc apply -f keck-ui/openshift/console-plugin.yaml
 
-# Point to the internally built image
-oc set image deployment/keck-power-management \
-  keck-power-management="$UI_IMAGE" \
-  -n keck-system
+# Point to the built image
+UI_IMAGE=$(oc get istag keck-power-management:latest -n keck-system \
+  -o jsonpath='{.image.dockerImageReference}')
+oc set image deploy/keck-power-management \
+  keck-power-management="$UI_IMAGE" -n keck-system
+
+# Set memory limit (UBI nginx needs more than default)
+oc set resources deploy/keck-power-management -n keck-system \
+  --limits=memory=128Mi --requests=memory=64Mi
 
 # Enable the plugin in the OpenShift console
 bash keck-ui/openshift/enable-plugin.sh
+
+# Update console plugin proxy to use TLS port
+oc patch consoleplugin keck-power-management --type=json -p '[
+  {"op":"replace","path":"/spec/proxy/0/endpoint/service/port","value":9443}
+]'
 ```
 
-### 4.5 Verify Everything
+### 4.6 Verify Everything
 
 ```bash
 oc get pods -n keck-system
