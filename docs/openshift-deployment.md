@@ -61,85 +61,26 @@ oc start-build keck-operator \
 
 ### 2.2 Build the Controller
 
-The controller needs a workspace context with `keck-common` and `keck-controller`:
+The controller uses `keck-controller/Dockerfile` which builds from UBI9 base images.
+The build context is the repo root (Dockerfile references `keck-common/` and `keck-controller/`):
 
 ```bash
-# Prepare build context
-TMPDIR=$(mktemp -d)
-cp -r keck-common "$TMPDIR/"
-cp -r keck-controller "$TMPDIR/"
-cat > "$TMPDIR/Cargo.toml" <<'TOML'
-[workspace]
-resolver = "2"
-members = ["keck-common", "keck-controller"]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-
-[workspace.dependencies]
-thiserror = "2"
-log = "0.4"
-TOML
-cat > "$TMPDIR/Dockerfile" <<'DOCKER'
-FROM rust:latest AS builder
-WORKDIR /build
-COPY . .
-RUN cargo build --release -p keck-controller
-
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
-COPY --from=builder /build/target/release/keck-controller /usr/bin/keck-controller
-USER 65532:65532
-ENTRYPOINT ["/usr/bin/keck-controller"]
-DOCKER
-
-# Build
 oc new-build --name=keck-controller --binary --strategy=docker -n keck-system
-oc start-build keck-controller --from-dir="$TMPDIR" --follow -n keck-system
-rm -rf "$TMPDIR"
+oc patch bc keck-controller -n keck-system --type=json \
+  -p '[{"op":"add","path":"/spec/strategy/dockerStrategy/dockerfilePath","value":"keck-controller/Dockerfile"}]'
+oc start-build keck-controller --from-dir=. --follow -n keck-system
 ```
 
 ### 2.3 Build the Agent
 
-The agent needs `keck-common`, `keck-ebpf`, and `keck-agent`.
-eBPF programs are compiled via aya-build during the cargo build:
+The agent uses `keck-agent/Dockerfile` which builds from UBI9 base images
+with Rust nightly and eBPF toolchain. The build context is the repo root:
 
 ```bash
-# Prepare build context
-TMPDIR=$(mktemp -d)
-cp -r keck-common "$TMPDIR/"
-cp -r keck-agent "$TMPDIR/"
-cat > "$TMPDIR/Cargo.toml" <<'TOML'
-[workspace]
-resolver = "2"
-members = ["keck-agent", "keck-common"]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-
-[workspace.dependencies]
-thiserror = "2"
-log = "0.4"
-TOML
-cat > "$TMPDIR/Dockerfile" <<'DOCKER'
-FROM rust:latest AS builder
-WORKDIR /build
-COPY . .
-RUN echo 'fn main() {}' > keck-agent/build.rs
-RUN cargo build --release -p keck-agent
-
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
-COPY --from=builder /build/target/release/keck-agent /usr/bin/keck-agent
-ENTRYPOINT ["/usr/bin/keck-agent"]
-DOCKER
-
-# Build
 oc new-build --name=keck-agent --binary --strategy=docker -n keck-system
-oc start-build keck-agent --from-dir="$TMPDIR" --follow -n keck-system
-rm -rf "$TMPDIR"
+oc patch bc keck-agent -n keck-system --type=json \
+  -p '[{"op":"add","path":"/spec/strategy/dockerStrategy/dockerfilePath","value":"keck-agent/Dockerfile"}]'
+oc start-build keck-agent --from-dir=. --follow -n keck-system
 ```
 
 ### 2.4 Build the UI (OpenShift Console Plugin)
