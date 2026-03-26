@@ -2,8 +2,8 @@
 
 //! Attribution engine: converts raw observations into per-workload power.
 //!
-//! This is the core algorithm that differentiates us from Kepler.
-//! Instead of: node_energy × (pid_cpu_time / total_cpu_time)
+//! Core attribution algorithm — bottom-up, per-core energy attribution.
+//! Instead of the traditional: node_energy × (pid_cpu_time / total_cpu_time)
 //! We do:      core_energy × weighted_model(pid_on_core) for each core
 //!
 //! The attribution flows bottom-up:

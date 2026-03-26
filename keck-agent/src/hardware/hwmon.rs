@@ -15,8 +15,8 @@
 //! 3. Voltage × current pairs (in1_input × curr1_input)
 //!
 //! This implementation focuses on direct power and energy sensors.
-//! Voltage × current pairing (the complex part of Kepler's hwmon) is
-//! deferred — it requires chip-specific rules and is fragile.
+//! Voltage × current pairing is deferred — it requires chip-specific
+//! rules and is fragile.
 
 use std::fs;
 use std::path::{Path, PathBuf};
