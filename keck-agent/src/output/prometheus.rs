@@ -3,8 +3,8 @@
 //! Prometheus metrics exporter.
 //!
 //! Exposes power attribution data as Prometheus metrics on /metrics.
-//! Unlike Kepler, we expose aggregated metrics by default (pod/namespace level)
-//! and only expose process-level metrics when explicitly requested (Full profile).
+//! Exposes aggregated metrics by default (pod/namespace level)
+//! and only exposes process-level metrics when explicitly requested (Full profile).
 //!
 //! Key metrics:
 //! - power_node_watts{component} — node-level power by component

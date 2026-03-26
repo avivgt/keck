@@ -1,7 +1,5 @@
-# Build stage
+# Build stage — native arch, cross-compile Go for target
 FROM golang:1.24 AS builder
-ARG TARGETOS
-ARG TARGETARCH
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
@@ -11,11 +9,12 @@ COPY cmd/ cmd/
 COPY api/ api/
 COPY controllers/ controllers/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -a -o manager cmd/main.go
 
 # Runtime stage — Red Hat UBI minimal (standard for OpenShift operators)
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+FROM --platform=linux/amd64 registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 LABEL name="keck-operator" \
       vendor="Keck Project" \

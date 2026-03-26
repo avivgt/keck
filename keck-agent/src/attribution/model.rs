@@ -161,7 +161,7 @@ impl AttributionModel for FrequencyWeightedModel {
     }
 }
 
-/// CPU time ratio model: simplest fallback, same as Kepler.
+/// CPU time ratio model: simplest fallback.
 ///
 /// Weight = time_ns (frequency and counters ignored)
 pub struct CpuTimeRatioModel;

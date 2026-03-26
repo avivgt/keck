@@ -2,8 +2,7 @@
 
 Accurate per-workload power metering for bare metal, VMs, and Kubernetes.
 
-Named after the [W. M. Keck Observatory](https://www.keckobservatory.org/) and
-built as a successor to [Kepler](https://github.com/sustainable-computing-io/kepler),
+Named after the [W. M. Keck Observatory](https://www.keckobservatory.org/),
 Keck measures energy consumption at every level — from individual CPU cores to
 fleet-wide ESG reports — with hardware-grounded accuracy and transparent error bounds.
 
@@ -22,7 +21,7 @@ reconciled against PSU ground truth.
 
 ### What makes Keck different
 
-| | Kepler | Keck |
+| Aspect | Traditional approach | Keck |
 |---|---|---|
 | **Attribution** | Node-level CPU time ratio | Per-core, frequency-weighted, multi-signal |
 | **Data source** | `/proc/[pid]/stat` polling | eBPF `sched_switch` tracepoint (in-kernel) |
@@ -73,7 +72,7 @@ Runs as a DaemonSet. Collects and attributes power on each node.
 - Three attribution models (auto-selected by available data):
   - **FullModel**: time × freq² × (1 + α·IPC + β·cache_miss_rate)
   - **FrequencyWeighted**: time × freq²
-  - **CpuTimeRatio**: time only (Kepler-equivalent fallback)
+  - **CpuTimeRatio**: time only (basic fallback)
 - Normalization: `Σ(process_energy) = core_energy` (energy conservation guaranteed)
 - Memory attribution: 60% PSS + 40% LLC miss ratio (with PSS caching)
 - Aggregation: process → container → pod → namespace
@@ -416,7 +415,7 @@ kubectl port-forward -n keck-system svc/keck-controller 8080:8080
 - [ ] Prometheus /metrics endpoint
 - [ ] Fleet manager deployment
 - [ ] Carbon tracking connected to external API
-- [ ] Benchmark: agent overhead vs Kepler
+- [ ] Benchmark: agent overhead measurement
 
 ## License
 

@@ -3,8 +3,7 @@
 //! K8s enrichment: maps cgroup IDs → containers → pods → namespaces.
 //!
 //! Uses the kubelet API (not the API server) to resolve container metadata,
-//! similar to Kepler's kubelet informer but using cgroup IDs from eBPF
-//! instead of parsing /proc/[pid]/cgroup in userspace.
+//! using cgroup IDs from eBPF instead of parsing /proc/[pid]/cgroup in userspace.
 //!
 //! The enrichment layer takes an AttributionSnapshot with raw PIDs/cgroup_ids
 //! and fills in container names, pod UIDs, namespaces, and aggregates
