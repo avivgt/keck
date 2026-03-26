@@ -399,7 +399,7 @@ kubectl port-forward -n keck-system svc/keck-controller 8080:8080
 
 ## Status
 
-**Deployed and running on OpenShift** (Dell PowerEdge R750, 2 nodes, NVIDIA A100 GPUs).
+**Deployed and running on OpenShift**.
 
 - [x] Kubernetes operator with OLM bundle and finalizer cleanup
 - [x] CRDs: KeckCluster, PowerBudget, PowerProfile
