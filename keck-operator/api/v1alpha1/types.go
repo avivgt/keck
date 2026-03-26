@@ -73,17 +73,17 @@ type RedfishSpec struct {
 	// and looks up its BMC endpoint from this map.
 	//
 	// Example:
-	//   - serial: "SERIAL1"
-	//     endpoint: "https://192.168.1.110"
-	//   - serial: "SERIAL2"
-	//     endpoint: "https://192.168.1.111"
+	//   - serial: "ABC1234"
+	//     endpoint: "https://10.0.0.1"
+	//   - serial: "DEF5678"
+	//     endpoint: "https://10.0.0.2"
 	NodeBMCMap []NodeBMCEntry `json:"nodeBMCMap"`
 }
 
 type NodeBMCEntry struct {
 	// Serial number of the node (from DMI/SMBIOS product_serial)
 	Serial string `json:"serial"`
-	// BMC/iDRAC endpoint URL (e.g., https://192.168.1.111)
+	// BMC/iDRAC endpoint URL (e.g., https://10.0.0.1)
 	Endpoint string `json:"endpoint"`
 }
 
