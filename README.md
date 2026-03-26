@@ -183,23 +183,26 @@ cd keck-operator && make build
 
 ## Quick Install on OpenShift
 
-Add Keck to your cluster's OperatorHub with one command:
+Install the Keck operator with one command:
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/avivgt/keck/main/install.yaml
 ```
 
-Then in the OpenShift console:
+This creates the `keck-system` namespace, adds the Keck catalog to OLM,
+and installs the operator automatically. After ~60 seconds:
 
-1. Go to **Operators → OperatorHub**
-2. Search for **"Keck"**
-3. Click **Keck Power Management** → **Install**
-4. After installation, go to **Installed Operators → Keck Operator**
-5. Click **Create KeckCluster** to deploy agents and controller
+1. Go to **Operators → Installed Operators** (namespace: `keck-system`)
+2. Click **Keck Operator**
+3. Click **Create KeckCluster** to deploy agents and controller
 
 To remove:
 ```bash
+oc delete sub keck-operator -n keck-system
+oc delete csv keck-operator.v0.1.0 -n keck-system
+oc delete operatorgroup keck-operator-group -n keck-system
 oc delete catalogsource keck-operator-catalog -n openshift-marketplace
+oc delete ns keck-system
 ```
 
 ## Deployment
