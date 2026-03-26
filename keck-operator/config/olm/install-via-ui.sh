@@ -98,6 +98,7 @@ CATALOG_IMAGE=$(oc get istag keck-catalog:latest -n "$NAMESPACE" \
 echo "  Catalog image: $CATALOG_IMAGE"
 
 # Step 4: Create CatalogSource
+# Use Quay image (not internal registry — openshift-marketplace can't pull from keck-system)
 echo
 echo "--- Step 4/5: Creating CatalogSource ---"
 cat <<YAML | oc apply -f -
@@ -108,7 +109,7 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: ${CATALOG_IMAGE}
+  image: quay.io/aguetta/keck-catalog:latest
   displayName: Keck Power Management
   publisher: Keck Project
   updateStrategy:
