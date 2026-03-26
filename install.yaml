@@ -1,13 +1,31 @@
-# Add Keck Operator to OpenShift OperatorHub.
+# Install Keck Operator on OpenShift via OLM.
 #
 # Usage:
 #   oc apply -f https://raw.githubusercontent.com/avivgt/keck/main/install.yaml
 #
-# Then go to: Operators → OperatorHub → search "Keck" → Install
+# This creates a CatalogSource, OperatorGroup, and Subscription.
+# The operator will appear in Operators → Installed Operators within ~60s.
+#
+# After installation, create a KeckCluster to deploy agents and controller:
+#   oc apply -f https://raw.githubusercontent.com/avivgt/keck/main/keck-operator/config/samples/keckcluster.yaml
 #
 # To remove:
+#   oc delete sub keck-operator -n keck-system
+#   oc delete csv keck-operator.v0.1.0 -n keck-system
+#   oc delete operatorgroup keck-operator-group -n keck-system
 #   oc delete catalogsource keck-operator-catalog -n openshift-marketplace
+#   oc delete ns keck-system
 
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keck-system
+  labels:
+    app.kubernetes.io/managed-by: keck-operator
+    app.kubernetes.io/part-of: keck
+
+---
 apiVersion: operators.coreos.com/v1alpha1
 kind: CatalogSource
 metadata:
@@ -21,3 +39,25 @@ spec:
   updateStrategy:
     registryPoll:
       interval: 10m
+
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: keck-operator-group
+  namespace: keck-system
+spec:
+  targetNamespaces: []
+
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: keck-operator
+  namespace: keck-system
+spec:
+  channel: alpha
+  name: keck-operator
+  source: keck-operator-catalog
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
