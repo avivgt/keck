@@ -2,8 +2,8 @@
 FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
 
 # Install Rust
-RUN dnf install -y gcc gcc-c++ make curl && dnf clean all
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN dnf install -y gcc gcc-c++ make && dnf clean all
+RUN curl-minimal --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
