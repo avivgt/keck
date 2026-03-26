@@ -2,9 +2,9 @@
 FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
 
 # Install Rust, nightly toolchain, and eBPF build dependencies
-RUN dnf install -y gcc gcc-c++ make clang llvm elfutils-libelf-devel curl && \
+RUN dnf install -y gcc gcc-c++ make clang llvm elfutils-libelf-devel && \
     dnf clean all
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+RUN curl-minimal --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup component add rust-src --toolchain nightly
 RUN cargo install bpf-linker
