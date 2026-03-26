@@ -1,8 +1,8 @@
 #!/bin/bash
 # Install Keck Operator via OpenShift OperatorHub UI.
 #
-# This script builds the operator bundle and catalog images on the cluster,
-# then creates a CatalogSource so the operator appears in OperatorHub.
+# Builds the operator and bundle images on the cluster,
+# then creates a CatalogSource using the pre-built catalog from Quay.
 # After running this, go to:
 #   Operators → OperatorHub → search "Keck" → Install
 #
@@ -22,7 +22,7 @@ echo "  Namespace: $NAMESPACE"
 echo
 
 # Step 1: Build the operator image
-echo "--- Step 1/5: Building operator image ---"
+echo "--- Step 1/3: Building operator image ---"
 oc get bc keck-operator -n "$NAMESPACE" 2>/dev/null || \
   oc new-build --name=keck-operator --binary --strategy=docker -n "$NAMESPACE"
 oc start-build keck-operator --from-dir="$OPERATOR_DIR" --follow -n "$NAMESPACE"
@@ -33,7 +33,7 @@ echo "  Operator image: $OPERATOR_IMAGE"
 
 # Step 2: Build the bundle image
 echo
-echo "--- Step 2/5: Building bundle image ---"
+echo "--- Step 2/3: Building bundle image ---"
 oc get bc keck-operator-bundle -n "$NAMESPACE" 2>/dev/null || \
   oc new-build --name=keck-operator-bundle --binary --strategy=docker -n "$NAMESPACE"
 
@@ -56,51 +56,9 @@ BUNDLE_IMAGE=$(oc get istag keck-operator-bundle:latest -n "$NAMESPACE" \
   -o jsonpath='{.image.dockerImageReference}')
 echo "  Bundle image: $BUNDLE_IMAGE"
 
-# Step 3: Build the catalog image
+# Step 3: Create CatalogSource (uses pre-built catalog from Quay)
 echo
-echo "--- Step 3/5: Building catalog image ---"
-oc get bc keck-catalog -n "$NAMESPACE" 2>/dev/null || \
-  oc new-build --name=keck-catalog --binary --strategy=docker -n "$NAMESPACE"
-
-TMPDIR=$(mktemp -d)
-mkdir -p "$TMPDIR/config/olm"
-cp "$SCRIPT_DIR/catalog.Dockerfile" "$TMPDIR/Dockerfile"
-
-# Create the FBC catalog with the real bundle image reference
-cat > "$TMPDIR/config/olm/catalog.yaml" <<YAML
----
-schema: olm.package
-name: keck-operator
-defaultChannel: alpha
----
-schema: olm.channel
-name: alpha
-package: keck-operator
-entries:
-  - name: keck-operator.v0.1.0
----
-schema: olm.bundle
-name: keck-operator.v0.1.0
-package: keck-operator
-image: ${BUNDLE_IMAGE}
-properties:
-  - type: olm.package
-    value:
-      packageName: keck-operator
-      version: 0.1.0
-YAML
-
-oc start-build keck-catalog --from-dir="$TMPDIR" --follow -n "$NAMESPACE"
-rm -rf "$TMPDIR"
-
-CATALOG_IMAGE=$(oc get istag keck-catalog:latest -n "$NAMESPACE" \
-  -o jsonpath='{.image.dockerImageReference}')
-echo "  Catalog image: $CATALOG_IMAGE"
-
-# Step 4: Create CatalogSource
-# Use Quay image (not internal registry — openshift-marketplace can't pull from keck-system)
-echo
-echo "--- Step 4/5: Creating CatalogSource ---"
+echo "--- Step 3/3: Creating CatalogSource ---"
 cat <<YAML | oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: CatalogSource
@@ -117,9 +75,8 @@ spec:
       interval: 10m
 YAML
 
-# Step 5: Wait for catalog to be ready
 echo
-echo "--- Step 5/5: Waiting for catalog to be ready ---"
+echo "Waiting for catalog to be ready..."
 for i in $(seq 1 30); do
   STATE=$(oc get catalogsource keck-operator-catalog -n openshift-marketplace \
     -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || echo "")
