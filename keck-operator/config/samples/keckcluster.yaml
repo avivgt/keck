@@ -21,10 +21,10 @@ spec:
       # Map each node's serial number to its BMC/iDRAC IP.
       # Find serial numbers: cat /sys/class/dmi/id/product_serial
       nodeBMCMap:
-        - serial: "41DQMH3"
-          endpoint: "https://192.168.52.166"
-        - serial: "D59N3L3"
-          endpoint: "https://192.168.52.172"
+        - serial: "SERIAL1"
+          endpoint: "https://192.168.1.110"
+        - serial: "SERIAL2"
+          endpoint: "https://192.168.1.111"
 
   controller:
     replicas: 1
