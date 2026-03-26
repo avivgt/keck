@@ -347,7 +347,7 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 	privileged := true
 	hostPID := true
 
-	image := fmt.Sprintf("%s:%s", imageRepo(keck), imageTag(keck))
+	image := agentImage(keck)
 
 	// Build environment variables
 	envVars := []corev1.EnvVar{
@@ -493,7 +493,7 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 }
 
 func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
-	image := fmt.Sprintf("%s:%s", imageRepo(keck), imageTag(keck))
+	image := controllerImage(keck)
 	replicas := keck.Spec.Controller.Replicas
 	if replicas == 0 {
 		replicas = 1
@@ -670,7 +670,15 @@ func imageRepo(keck *keckv1alpha1.KeckCluster) string {
 	if keck.Spec.Image.Repository != "" {
 		return keck.Spec.Image.Repository
 	}
-	return "quay.io/aguetta/keck"
+	return "quay.io/aguetta"
+}
+
+func agentImage(keck *keckv1alpha1.KeckCluster) string {
+	return fmt.Sprintf("%s/keck-agent:%s", imageRepo(keck), imageTag(keck))
+}
+
+func controllerImage(keck *keckv1alpha1.KeckCluster) string {
+	return fmt.Sprintf("%s/keck-controller:%s", imageRepo(keck), imageTag(keck))
 }
 
 func imageTag(keck *keckv1alpha1.KeckCluster) string {

@@ -113,8 +113,8 @@ type ControllerSpec struct {
 }
 
 type ImageSpec struct {
-	// Container image repository
-	// +kubebuilder:default="quay.io/aguetta/keck"
+	// Container image registry prefix (images: <repo>/keck-agent, <repo>/keck-controller)
+	// +kubebuilder:default="quay.io/aguetta"
 	Repository string `json:"repository,omitempty"`
 
 	// Image tag
