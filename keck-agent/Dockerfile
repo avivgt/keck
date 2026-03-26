@@ -18,7 +18,7 @@ COPY keck-ebpf/ keck-ebpf/
 COPY keck-agent/ keck-agent/
 
 # Create minimal workspace Cargo.toml for agent only
-RUN echo '[workspace]\nresolver = "2"\nmembers = ["keck-common", "keck-ebpf", "keck-agent"]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\nlicense = "Apache-2.0"\n\n[workspace.dependencies]\nthiserror = "2"\nlog = "0.4"' > Cargo.toml
+RUN printf '[workspace]\nresolver = "2"\nmembers = ["keck-common", "keck-ebpf", "keck-agent"]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\nlicense = "Apache-2.0"\n\n[workspace.dependencies]\nthiserror = "2"\nlog = "0.4"\n' > Cargo.toml
 
 # Build the agent (includes eBPF compilation via aya-build)
 RUN cargo build --release -p keck-agent
