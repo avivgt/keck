@@ -226,6 +226,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut mem_best: Option<ComponentReading> = None;
         let mut gpu_best: Option<ComponentReading> = None;
         let mut platform_reading: Option<ComponentReading> = None;
+        let mut io_best: Option<ComponentReading> = None;
+        let mut storage_best: Option<ComponentReading> = None;
+        let mut fan_best: Option<ComponentReading> = None;
 
         for source in &sources {
             let reading = match source.read() {
@@ -329,7 +332,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Component::Platform => {
                     if is_better(&platform_reading, &cr) { platform_reading = Some(cr); }
                 }
-                _ => {}
+                Component::Nic => {
+                    if is_better(&io_best, &cr) { io_best = Some(cr); }
+                }
+                Component::Storage => {
+                    if is_better(&storage_best, &cr) { storage_best = Some(cr); }
+                }
+                Component::Fan => {
+                    if is_better(&fan_best, &cr) { fan_best = Some(cr); }
+                }
             }
         }
 
@@ -348,12 +359,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             hardware::ReadingType::Derived => "derived",
         }).unwrap_or("none");
 
-        let total = cpu_uw + mem_uw + gpu_uw;
-        let idle_uw = platform_uw.map(|p| p.saturating_sub(total)).unwrap_or(0);
+        let io_uw = io_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
+        let storage_uw = storage_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
+        let fan_uw = fan_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
+
+        let total_attributed = cpu_uw + mem_uw + gpu_uw + io_uw + storage_uw + fan_uw;
+        let idle_uw = platform_uw.map(|p| p.saturating_sub(total_attributed)).unwrap_or(0);
 
         let error_ratio = if let Some(p) = platform_uw {
             if p > 0 {
-                (p as i64 - total as i64).unsigned_abs() as f64 / p as f64
+                (p as i64 - total_attributed as i64).unsigned_abs() as f64 / p as f64
             } else {
                 0.0
             }
