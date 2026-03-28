@@ -241,13 +241,34 @@ pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
         sources.push(Box::new(src));
     }
 
-    // ─── PCIe/NIC Power ──────────────────────────────────────────
-    if let Some(src) = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalPciePower", Component::Nic, "Redfish Telemetry PCIe") {
+    // ─── I/O / PCIe Power ──────────────────────────────────────
+    if let Some(src) = try_sensor_pct(&client, &endpoint, &username, &password, "SystemBoardIOUsage", Component::Nic, "Redfish Sensor I/O") {
+        log::info!("  I/O: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    } else if let Some(src) = try_telemetry_metric(&client, &endpoint, &username, &password, "TotalPciePower", Component::Nic, "Redfish Telemetry PCIe") {
         log::info!("  PCIe: {} (measured)", src.name());
+        sources.push(Box::new(src));
+    } else {
+        log::info!("  I/O: no Redfish source");
+    }
+
+    // ─── Platform/Chipset Power (from sensor %) ──────────────────
+    // SYS usage = chipset + VRM + misc board power (infrastructure, not workload)
+    if let Some(src) = try_sensor_pct(&client, &endpoint, &username, &password, "SystemBoardSYSUsage", Component::Platform, "Redfish Sensor Platform") {
+        log::info!("  Platform subsystem: {} (measured)", src.name());
         sources.push(Box::new(src));
     }
 
-    // ─── Platform Total (always) ─────────────────────────────────
+    // ─── Per-PSU Input/Output/Efficiency ──────────────────────────
+    let power_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Power", endpoint);
+    if let Ok(psu_sources) = discover_psu_detail(&client, &power_url, &username, &password, &endpoint) {
+        for src in &psu_sources {
+            log::info!("  PSU: {} (measured)", src.name());
+        }
+        sources.extend(psu_sources.into_iter().map(|s| Box::new(s) as Box<dyn PowerSource>));
+    }
+
+    // ─── PSU Total (always) ───────────────────────────────────────
     sources.push(Box::new(RedfishSource {
         id: SourceId(format!("redfish:platform:{}", endpoint)),
         display_name: format!("Redfish PSU Total ({})", endpoint),
@@ -260,7 +281,7 @@ pub fn discover() -> Result<Vec<Box<dyn PowerSource>>, SourceError> {
         password: password.clone(),
         client: client.clone(),
     }));
-    log::info!("  Platform: PSU total (measured)");
+    log::info!("  PSU Total: measured");
 
     Ok(sources)
 }
@@ -302,6 +323,73 @@ fn try_telemetry_metric(
     // (definition without data is not useful)
     log::debug!("  {} MetricDefinition exists but no sensor reading available", metric_id);
     None
+}
+
+/// Discover per-PSU input/output power from the Power API.
+fn discover_psu_detail(
+    client: &reqwest::blocking::Client,
+    power_url: &str,
+    username: &str,
+    password: &str,
+    endpoint: &str,
+) -> Result<Vec<RedfishSource>, SourceError> {
+    let resp = client.get(power_url)
+        .basic_auth(username, Some(password))
+        .send()
+        .map_err(|e| SourceError::Unavailable(format!("Redfish: {}", e)))?;
+    let body: serde_json::Value = resp.json()
+        .map_err(|e| SourceError::Parse(format!("JSON: {}", e)))?;
+
+    let mut sources = Vec::new();
+
+    if let Some(psus) = body.get("PowerSupplies").and_then(|v| v.as_array()) {
+        for (i, psu) in psus.iter().enumerate() {
+            let name = psu.get("Name").and_then(|v| v.as_str()).unwrap_or("PSU");
+            let has_input = psu.get("PowerInputWatts").and_then(|v| v.as_f64()).is_some();
+            let has_output = psu.get("PowerOutputWatts").and_then(|v| v.as_f64()).is_some();
+
+            if has_input {
+                // Use per-PSU sensor endpoints if available
+                let input_sensor = format!("PSU.Slot.{}_InputPower", i + 1);
+                let sensor_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", endpoint, input_sensor);
+                if probe_reading(client, &sensor_url, username, password).is_some() {
+                    sources.push(RedfishSource {
+                        id: SourceId(format!("redfish:psu{}:input:{}", i + 1, endpoint)),
+                        display_name: format!("{} Input ({})", name, endpoint),
+                        component: Component::Platform,
+                        read_method: ReadMethod::SensorReading {
+                            path: format!("/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", input_sensor),
+                        },
+                        endpoint: endpoint.to_string(),
+                        username: username.to_string(),
+                        password: password.to_string(),
+                        client: client.clone(),
+                    });
+                }
+            }
+
+            if has_output {
+                let output_sensor = format!("PSU.Slot.{}_OutputPower", i + 1);
+                let sensor_url = format!("{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", endpoint, output_sensor);
+                if probe_reading(client, &sensor_url, username, password).is_some() {
+                    sources.push(RedfishSource {
+                        id: SourceId(format!("redfish:psu{}:output:{}", i + 1, endpoint)),
+                        display_name: format!("{} Output ({})", name, endpoint),
+                        component: Component::Platform,
+                        read_method: ReadMethod::SensorReading {
+                            path: format!("/redfish/v1/Chassis/System.Embedded.1/Sensors/{}", output_sensor),
+                        },
+                        endpoint: endpoint.to_string(),
+                        username: username.to_string(),
+                        password: password.to_string(),
+                        client: client.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(sources)
 }
 
 /// Try to create a source from Sensors API percentage reading.
