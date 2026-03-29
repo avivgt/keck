@@ -127,6 +127,22 @@ pub struct PidCgroupValue {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for PidCgroupValue {}
 
+// ─── Network I/O tracking: per-PID bytes sent/received ───────
+
+/// Value for the pid_net_bytes BPF hash map.
+/// Accumulates TCP bytes sent and received per PID.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PidNetBytes {
+    /// Total bytes sent via TCP
+    pub tx_bytes: u64,
+    /// Total bytes received via TCP
+    pub rx_bytes: u64,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for PidNetBytes {}
+
 // ─── Map size constants ──────────────────────────────────────────
 
 /// Maximum number of entries in the pid_cpu_time hash map.
@@ -144,6 +160,9 @@ pub const MAX_CPU_FREQ_ENTRIES: u32 = 32768;
 
 /// Maximum entries in pid_cgroup map.
 pub const MAX_PID_CGROUP_ENTRIES: u32 = 65536;
+
+/// Maximum entries in pid_net_bytes map.
+pub const MAX_PID_NET_ENTRIES: u32 = 65536;
 
 #[cfg(test)]
 mod tests {
