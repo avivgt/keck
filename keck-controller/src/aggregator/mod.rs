@@ -27,6 +27,8 @@ pub struct PodPowerReport {
     pub gpu_uw: u64,
     #[serde(default)]
     pub storage_uw: u64,
+    #[serde(default)]
+    pub io_uw: u64,
     pub total_uw: u64,
     pub timestamp: SystemTime,
 }
@@ -95,6 +97,7 @@ pub struct NamespacePower {
     pub memory_uw: u64,
     pub gpu_uw: u64,
     pub storage_uw: u64,
+    pub io_uw: u64,
     pub total_uw: u64,
     pub pod_count: usize,
 }
@@ -268,6 +271,7 @@ impl ClusterAggregator {
                     memory_uw: 0,
                     gpu_uw: 0,
                     storage_uw: 0,
+                    io_uw: 0,
                     total_uw: 0,
                     pod_count: 0,
                 });
@@ -276,6 +280,7 @@ impl ClusterAggregator {
             entry.memory_uw += state.report.memory_uw;
             entry.gpu_uw += state.report.gpu_uw;
             entry.storage_uw += state.report.storage_uw;
+            entry.io_uw += state.report.io_uw;
             entry.total_uw += state.report.total_uw;
             entry.pod_count += 1;
         }

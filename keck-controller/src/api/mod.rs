@@ -295,6 +295,7 @@ async fn handle_namespaces(
                 "memory_watts": ns.memory_uw as f64 / 1e6,
                 "gpu_watts": ns.gpu_uw as f64 / 1e6,
                 "storage_watts": ns.storage_uw as f64 / 1e6,
+                "io_watts": ns.io_uw as f64 / 1e6,
                 "total_watts": ns.total_uw as f64 / 1e6,
                 "pod_count": ns.pod_count,
             })
@@ -325,6 +326,7 @@ async fn handle_namespace_pods(
                 "memory_watts": p.memory_uw as f64 / 1e6,
                 "gpu_watts": p.gpu_uw as f64 / 1e6,
                 "storage_watts": p.storage_uw as f64 / 1e6,
+                "io_watts": p.io_uw as f64 / 1e6,
                 "total_watts": p.total_uw as f64 / 1e6,
             })
         })
@@ -400,6 +402,7 @@ async fn handle_pod(
         "memory_watts": pod.memory_uw as f64 / 1e6,
         "gpu_watts": pod.gpu_uw as f64 / 1e6,
         "storage_watts": pod.storage_uw as f64 / 1e6,
+        "io_watts": pod.io_uw as f64 / 1e6,
         "total_watts": pod.total_uw as f64 / 1e6,
     })))
 }

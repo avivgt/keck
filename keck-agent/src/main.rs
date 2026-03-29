@@ -76,6 +76,8 @@ struct PodPowerReport {
     gpu_uw: u64,
     #[serde(default)]
     storage_uw: u64,
+    #[serde(default)]
+    io_uw: u64,
     total_uw: u64,
     timestamp: SystemTime,
 }
@@ -400,9 +402,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Always use /proc for full pod list + PSS + memory attribution.
         // When CPU source is RAPL (estimated) and eBPF has data, override
         // CPU attribution with frequency-weighted per-core data from eBPF.
-        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, storage_uw, total_llc_misses,
-            &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults,
-            &mut prev_io_bytes, &mut pss_cache, tick_count);
+        // Get per-PID network bytes from eBPF snapshot (if available)
+        let ebpf_net_bytes = ebpf_snapshot.as_ref()
+            .map(|s| &s.pid_net_bytes)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, storage_uw, io_uw,
+            total_llc_misses, &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults,
+            &mut prev_io_bytes, &mut pss_cache, &ebpf_net_bytes, tick_count);
 
         if cpu_type == "estimated" {
             if let Some(ref snapshot) = ebpf_snapshot {
@@ -695,6 +703,7 @@ fn enumerate_pods_ebpf(
                 memory_uw: pod_mem_uw,
                 gpu_uw: 0,
                 storage_uw: 0,
+                io_uw: 0,
                 total_uw: pod_cpu_uw + pod_mem_uw,
                 timestamp: SystemTime::now(),
             }
@@ -839,6 +848,7 @@ fn enumerate_pods_ebpf_weighted(
             memory_uw: mem,
             gpu_uw: 0,
             storage_uw: 0,
+            io_uw: 0,
             total_uw: cpu + mem,
             timestamp: SystemTime::now(),
         }
@@ -860,6 +870,8 @@ struct ProcessMetrics {
     majflt_delta: u64,
     /// Disk I/O bytes (read_bytes + write_bytes from /proc/[pid]/io)
     io_bytes_delta: u64,
+    /// Network I/O bytes (tx + rx from eBPF tcp kprobes)
+    net_bytes: u64,
 }
 
 /// Fields parsed from /proc/[pid]/stat.
@@ -967,12 +979,14 @@ fn enumerate_pods(
     total_cpu_uw: u64,
     total_mem_uw: u64,
     total_storage_uw: u64,
+    total_io_uw: u64,
     total_llc_misses: u64,
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
     prev_io_bytes: &mut HashMap<u32, u64>,
     pss_cache: &mut HashMap<u32, u64>,
+    pid_net_bytes: &HashMap<u32, (u64, u64)>,
     tick_count: u64,
 ) -> Vec<PodPowerReport> {
     // Only refresh PSS every 5 cycles (~50s) — smaps_rollup is expensive
@@ -1064,6 +1078,11 @@ fn enumerate_pods(
         };
 
         if let Some(pod_uid) = extract_pod_uid(&cgroup_content) {
+            // Network bytes from eBPF (if available)
+            let net = pid_net_bytes.get(&pid)
+                .map(|(tx, rx)| tx + rx)
+                .unwrap_or(0);
+
             process_metrics.push(ProcessMetrics {
                 pod_uid,
                 cpu_ticks: cpu_delta,
@@ -1071,6 +1090,7 @@ fn enumerate_pods(
                 minflt_delta,
                 majflt_delta,
                 io_bytes_delta: io_delta,
+                net_bytes: net,
             });
         }
     }
@@ -1085,9 +1105,11 @@ fn enumerate_pods(
         pss_kb: u64,
         pgfaults: u64,
         io_bytes: u64,
+        net_bytes: u64,
     }
 
     let mut pod_metrics: HashMap<String, PodMetrics> = HashMap::new();
+    let mut total_all_net_bytes: u64 = 0;
 
     for pm in &process_metrics {
         let entry = pod_metrics.entry(pm.pod_uid.clone()).or_insert(PodMetrics {
@@ -1095,11 +1117,14 @@ fn enumerate_pods(
             pss_kb: 0,
             pgfaults: 0,
             io_bytes: 0,
+            net_bytes: 0,
         });
         entry.cpu_ticks += pm.cpu_ticks;
         entry.pss_kb += pm.rss_pages;
         entry.pgfaults += pm.minflt_delta + pm.majflt_delta * 10;
         entry.io_bytes += pm.io_bytes_delta;
+        entry.net_bytes += pm.net_bytes;
+        total_all_net_bytes += pm.net_bytes;
     }
 
     // Phase 3: Normalize against ALL processes
@@ -1148,12 +1173,21 @@ fn enumerate_pods(
             let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
 
             // Storage power proportional to disk I/O bytes
-            let io_ratio = if total_all_io_bytes > 0 {
+            let disk_io_ratio = if total_all_io_bytes > 0 {
                 metrics.io_bytes as f64 / total_all_io_bytes as f64
             } else {
                 0.0
             };
-            let pod_storage_uw = (total_storage_uw as f64 * io_ratio) as u64;
+            let pod_storage_uw = (total_storage_uw as f64 * disk_io_ratio) as u64;
+
+            // Network I/O power proportional to TCP bytes (from eBPF)
+            // Falls back to CPU ratio when eBPF net data unavailable
+            let net_ratio = if total_all_net_bytes > 0 {
+                metrics.net_bytes as f64 / total_all_net_bytes as f64
+            } else {
+                cpu_ratio // proxy: more CPU activity ≈ more network
+            };
+            let pod_io_uw = (total_io_uw as f64 * net_ratio) as u64;
 
             // Resolve pod name and namespace
             let (pod_name, namespace) = match pod_cache.get(pod_uid) {
@@ -1170,7 +1204,8 @@ fn enumerate_pods(
                 memory_uw: pod_mem_uw,
                 gpu_uw: 0,
                 storage_uw: pod_storage_uw,
-                total_uw: pod_cpu_uw + pod_mem_uw + pod_storage_uw,
+                io_uw: pod_io_uw,
+                total_uw: pod_cpu_uw + pod_mem_uw + pod_storage_uw + pod_io_uw,
                 timestamp: SystemTime::now(),
             }
         })
@@ -1300,6 +1335,7 @@ async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, 
                     memory_uw: 0,
                     gpu_uw: gpu_uw,
                     storage_uw: 0,
+                    io_uw: 0,
                     total_uw: gpu_uw,
                     timestamp: SystemTime::now(),
                 });
