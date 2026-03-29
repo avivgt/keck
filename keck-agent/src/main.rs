@@ -74,6 +74,8 @@ struct PodPowerReport {
     cpu_uw: u64,
     memory_uw: u64,
     gpu_uw: u64,
+    #[serde(default)]
+    storage_uw: u64,
     total_uw: u64,
     timestamp: SystemTime,
 }
@@ -180,6 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_cpu_ticks: HashMap<u32, u64> = HashMap::new();
     let mut prev_page_faults: HashMap<u32, (u64, u64)> = HashMap::new(); // (minflt, majflt)
     let mut pss_cache: HashMap<u32, u64> = HashMap::new(); // pid → PSS in KB (refreshed every 5 cycles)
+    let mut prev_io_bytes: HashMap<u32, u64> = HashMap::new(); // pid → cumulative I/O bytes
     let mut tick_count: u64 = 0;
 
     // Pod metadata cache: uid → (name, namespace)
@@ -397,9 +400,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Always use /proc for full pod list + PSS + memory attribution.
         // When CPU source is RAPL (estimated) and eBPF has data, override
         // CPU attribution with frequency-weighted per-core data from eBPF.
-        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, total_llc_misses,
+        let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, storage_uw, total_llc_misses,
             &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults,
-            &mut pss_cache, tick_count);
+            &mut prev_io_bytes, &mut pss_cache, tick_count);
 
         if cpu_type == "estimated" {
             if let Some(ref snapshot) = ebpf_snapshot {
@@ -435,7 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Periodically clean up stale PIDs from caches and BPF maps
         tick_count += 1;
         if tick_count % 30 == 0 {
-            cleanup_stale_pids(&mut prev_cpu_ticks, &mut prev_page_faults, &mut pss_cache);
+            cleanup_stale_pids(&mut prev_cpu_ticks, &mut prev_page_faults, &mut pss_cache, &mut prev_io_bytes);
             if let Some(ref mut observer) = ebpf_observer {
                 match observer.cleanup_dead_pids() {
                     Ok(n) if n > 0 => info!("Cleaned {} dead PIDs from BPF PID_CGROUP map", n),
@@ -691,6 +694,7 @@ fn enumerate_pods_ebpf(
                 cpu_uw: pod_cpu_uw,
                 memory_uw: pod_mem_uw,
                 gpu_uw: 0,
+                storage_uw: 0,
                 total_uw: pod_cpu_uw + pod_mem_uw,
                 timestamp: SystemTime::now(),
             }
@@ -834,6 +838,7 @@ fn enumerate_pods_ebpf_weighted(
             cpu_uw: cpu,
             memory_uw: mem,
             gpu_uw: 0,
+            storage_uw: 0,
             total_uw: cpu + mem,
             timestamp: SystemTime::now(),
         }
@@ -853,6 +858,8 @@ struct ProcessMetrics {
     minflt_delta: u64,
     /// Major page faults (actual disk reads → memory)
     majflt_delta: u64,
+    /// Disk I/O bytes (read_bytes + write_bytes from /proc/[pid]/io)
+    io_bytes_delta: u64,
 }
 
 /// Fields parsed from /proc/[pid]/stat.
@@ -925,6 +932,22 @@ fn read_rss_pages(pid_str: &str) -> Option<u64> {
     fields[1].parse().ok()
 }
 
+/// Read disk I/O bytes from /proc/[pid]/io.
+/// Returns read_bytes + write_bytes (actual disk I/O, not page cache).
+fn read_io_bytes(pid_str: &str) -> Option<u64> {
+    let path = format!("{}/{}/io", procfs_root(), pid_str);
+    let content = fs::read_to_string(&path).ok()?;
+    let mut total = 0u64;
+    for line in content.lines() {
+        if line.starts_with("read_bytes:") || line.starts_with("write_bytes:") {
+            if let Some(val) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()) {
+                total += val;
+            }
+        }
+    }
+    Some(total)
+}
+
 /// Enumerate pods with accurate per-process attribution.
 ///
 /// Power is distributed based on:
@@ -943,21 +966,24 @@ fn enumerate_pods(
     node_name: &str,
     total_cpu_uw: u64,
     total_mem_uw: u64,
+    total_storage_uw: u64,
     total_llc_misses: u64,
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
+    prev_io_bytes: &mut HashMap<u32, u64>,
     pss_cache: &mut HashMap<u32, u64>,
     tick_count: u64,
 ) -> Vec<PodPowerReport> {
     // Only refresh PSS every 5 cycles (~50s) — smaps_rollup is expensive
     let refresh_pss = tick_count % 5 == 0;
-    // Phase 1: Scan ALL processes for CPU time and PSS.
+    // Phase 1: Scan ALL processes for CPU time, PSS, and disk I/O.
     // Normalize against ALL processes (not just pods) for proper attribution.
     let mut process_metrics: Vec<ProcessMetrics> = Vec::new();
     let mut total_all_cpu_ticks: u64 = 0;
     let mut total_all_pss: u64 = 0;
     let mut total_all_pgfaults: u64 = 0;
+    let mut total_all_io_bytes: u64 = 0;
 
     let proc_entries = match fs::read_dir(procfs_root()) {
         Ok(entries) => entries,
@@ -1023,6 +1049,13 @@ fn enumerate_pods(
         };
         total_all_pss += pss;
 
+        // Disk I/O delta from /proc/[pid]/io
+        let current_io = read_io_bytes(&pid_str).unwrap_or(0);
+        let prev_io = prev_io_bytes.get(&pid).copied().unwrap_or(current_io);
+        let io_delta = current_io.saturating_sub(prev_io);
+        prev_io_bytes.insert(pid, current_io);
+        total_all_io_bytes += io_delta;
+
         // Check if this process belongs to a pod
         let cgroup_path = format!("{}/{}/cgroup", procfs_root(), pid_str);
         let cgroup_content = match fs::read_to_string(&cgroup_path) {
@@ -1034,9 +1067,10 @@ fn enumerate_pods(
             process_metrics.push(ProcessMetrics {
                 pod_uid,
                 cpu_ticks: cpu_delta,
-                rss_pages: pss, // Now PSS (KB), not RSS pages
+                rss_pages: pss,
                 minflt_delta,
                 majflt_delta,
+                io_bytes_delta: io_delta,
             });
         }
     }
@@ -1049,7 +1083,8 @@ fn enumerate_pods(
     struct PodMetrics {
         cpu_ticks: u64,
         pss_kb: u64,
-        pgfaults: u64, // weighted: minflt + 10*majflt
+        pgfaults: u64,
+        io_bytes: u64,
     }
 
     let mut pod_metrics: HashMap<String, PodMetrics> = HashMap::new();
@@ -1059,10 +1094,12 @@ fn enumerate_pods(
             cpu_ticks: 0,
             pss_kb: 0,
             pgfaults: 0,
+            io_bytes: 0,
         });
         entry.cpu_ticks += pm.cpu_ticks;
-        entry.pss_kb += pm.rss_pages; // This is now PSS in KB
+        entry.pss_kb += pm.rss_pages;
         entry.pgfaults += pm.minflt_delta + pm.majflt_delta * 10;
+        entry.io_bytes += pm.io_bytes_delta;
     }
 
     // Phase 3: Normalize against ALL processes
@@ -1110,6 +1147,14 @@ fn enumerate_pods(
             let mem_ratio = pss_weight * pss_ratio + llc_weight * llc_ratio;
             let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
 
+            // Storage power proportional to disk I/O bytes
+            let io_ratio = if total_all_io_bytes > 0 {
+                metrics.io_bytes as f64 / total_all_io_bytes as f64
+            } else {
+                0.0
+            };
+            let pod_storage_uw = (total_storage_uw as f64 * io_ratio) as u64;
+
             // Resolve pod name and namespace
             let (pod_name, namespace) = match pod_cache.get(pod_uid) {
                 Some(info) => (info.name.clone(), info.namespace.clone()),
@@ -1124,7 +1169,8 @@ fn enumerate_pods(
                 cpu_uw: pod_cpu_uw,
                 memory_uw: pod_mem_uw,
                 gpu_uw: 0,
-                total_uw: pod_cpu_uw + pod_mem_uw,
+                storage_uw: pod_storage_uw,
+                total_uw: pod_cpu_uw + pod_mem_uw + pod_storage_uw,
                 timestamp: SystemTime::now(),
             }
         })
@@ -1137,6 +1183,7 @@ fn cleanup_stale_pids(
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
     pss_cache: &mut HashMap<u32, u64>,
+    prev_io_bytes: &mut HashMap<u32, u64>,
 ) {
     let active_pids: std::collections::HashSet<u32> = fs::read_dir(procfs_root())
         .map(|entries| {
@@ -1150,6 +1197,7 @@ fn cleanup_stale_pids(
     prev_cpu_ticks.retain(|pid, _| active_pids.contains(pid));
     prev_page_faults.retain(|pid, _| active_pids.contains(pid));
     pss_cache.retain(|pid, _| active_pids.contains(pid));
+    prev_io_bytes.retain(|pid, _| active_pids.contains(pid));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -1251,6 +1299,7 @@ async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, 
                     cpu_uw: 0,
                     memory_uw: 0,
                     gpu_uw: gpu_uw,
+                    storage_uw: 0,
                     total_uw: gpu_uw,
                     timestamp: SystemTime::now(),
                 });
