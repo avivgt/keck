@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use aya::maps::{HashMap as BpfHashMap, MapData};
-use aya::programs::TracePoint;
+use aya::programs::{KProbe, TracePoint};
 use aya::{Ebpf, EbpfLoader};
-use keck_common::{CpuFreqKey, CpuFreqTime, PidCgroupValue, PidCpuKey, PidCpuTime};
+use keck_common::{CpuFreqKey, CpuFreqTime, PidCgroupValue, PidCpuKey, PidCpuTime, PidNetBytes};
 use log::{info, warn};
 use thiserror::Error;
 
@@ -27,6 +27,8 @@ pub struct EbpfSnapshot {
     pub cpu_freq_times: Vec<(u32, u32, u64)>,
     /// pid → cgroup_id
     pub pid_cgroups: HashMap<u32, u64>,
+    /// pid → (tx_bytes, rx_bytes) network I/O
+    pub pid_net_bytes: HashMap<u32, (u64, u64)>,
 }
 
 pub struct EbpfObserver {
@@ -66,6 +68,34 @@ impl EbpfObserver {
         prog.attach("power", "cpu_frequency")
             .map_err(|e| ObserverError::Ebpf(format!("cpu_frequency attach: {}", e)))?;
         info!("eBPF: attached cpu_frequency tracepoint");
+
+        // Attach tcp_sendmsg kprobe (optional — network I/O tracking)
+        match bpf.program_mut("tcp_sendmsg") {
+            Some(prog) => {
+                let kprobe: &mut KProbe = prog.try_into()
+                    .map_err(|e| ObserverError::Ebpf(format!("tcp_sendmsg cast: {}", e)))?;
+                kprobe.load()
+                    .map_err(|e| ObserverError::Ebpf(format!("tcp_sendmsg load: {}", e)))?;
+                kprobe.attach("tcp_sendmsg", 0)
+                    .map_err(|e| ObserverError::Ebpf(format!("tcp_sendmsg attach: {}", e)))?;
+                info!("eBPF: attached tcp_sendmsg kprobe");
+            }
+            None => warn!("eBPF: tcp_sendmsg program not found, network I/O tracking disabled"),
+        }
+
+        // Attach tcp_recvmsg kprobe
+        match bpf.program_mut("tcp_recvmsg") {
+            Some(prog) => {
+                let kprobe: &mut KProbe = prog.try_into()
+                    .map_err(|e| ObserverError::Ebpf(format!("tcp_recvmsg cast: {}", e)))?;
+                kprobe.load()
+                    .map_err(|e| ObserverError::Ebpf(format!("tcp_recvmsg load: {}", e)))?;
+                kprobe.attach("tcp_recvmsg", 0)
+                    .map_err(|e| ObserverError::Ebpf(format!("tcp_recvmsg attach: {}", e)))?;
+                info!("eBPF: attached tcp_recvmsg kprobe");
+            }
+            None => warn!("eBPF: tcp_recvmsg program not found, network I/O tracking disabled"),
+        }
 
         Ok(Self { bpf })
     }
@@ -132,10 +162,28 @@ impl EbpfObserver {
             }
         }
 
+        // Drain PID_NET_BYTES map (drain-and-delete for deltas)
+        let mut pid_net_bytes = HashMap::new();
+        if let Some(map_data) = self.bpf.map_mut("PID_NET_BYTES") {
+            if let Ok(mut map) = BpfHashMap::<&mut MapData, u32, PidNetBytes>::try_from(map_data) {
+                let mut keys_to_delete = Vec::new();
+                for item in map.iter() {
+                    if let Ok((pid, value)) = item {
+                        pid_net_bytes.insert(pid, (value.tx_bytes, value.rx_bytes));
+                        keys_to_delete.push(pid);
+                    }
+                }
+                for key in &keys_to_delete {
+                    let _ = map.remove(key);
+                }
+            }
+        }
+
         Ok(EbpfSnapshot {
             pid_cpu_times,
             cpu_freq_times,
             pid_cgroups,
+            pid_net_bytes,
         })
     }
 

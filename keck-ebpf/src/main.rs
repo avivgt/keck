@@ -9,14 +9,15 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_cgroup_id, bpf_get_smp_processor_id, bpf_ktime_get_ns},
-    macros::{map, tracepoint},
+    helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_smp_processor_id, bpf_ktime_get_ns},
+    macros::{kprobe, map, tracepoint},
     maps::{HashMap, PerCpuArray},
-    programs::TracePointContext,
+    programs::{ProbeContext, TracePointContext},
 };
 use keck_common::{
     CpuFreqKey, CpuFreqState, CpuFreqTime, CpuSchedState, MAX_CPU_FREQ_ENTRIES,
-    MAX_PID_CGROUP_ENTRIES, MAX_PID_CPU_ENTRIES, PidCgroupValue, PidCpuKey, PidCpuTime,
+    MAX_PID_CGROUP_ENTRIES, MAX_PID_CPU_ENTRIES, MAX_PID_NET_ENTRIES,
+    PidCgroupValue, PidCpuKey, PidCpuTime, PidNetBytes,
 };
 
 // ─── BPF Maps ────────────────────────────────────────────────────
@@ -38,6 +39,10 @@ static CPU_FREQ_STATE: PerCpuArray<CpuFreqState> = PerCpuArray::with_max_entries
 #[map]
 static PID_CGROUP: HashMap<u32, PidCgroupValue> =
     HashMap::with_max_entries(MAX_PID_CGROUP_ENTRIES, 0);
+
+#[map]
+static PID_NET_BYTES: HashMap<u32, PidNetBytes> =
+    HashMap::with_max_entries(MAX_PID_NET_ENTRIES, 0);
 
 // ─── sched_switch ────────────────────────────────────────────────
 
@@ -132,6 +137,53 @@ fn handle_cpu_frequency(ctx: TracePointContext) -> Result<(), i64> {
     state.start_time_ns = now;
 
     Ok(())
+}
+
+// ─── TCP network I/O tracking ────────────────────────────────────
+
+/// kprobe on tcp_sendmsg — tracks bytes sent per PID.
+/// int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+/// The 3rd argument (size) is the number of bytes being sent.
+#[kprobe]
+pub fn tcp_sendmsg(ctx: ProbeContext) -> u32 {
+    let pid = (unsafe { bpf_get_current_pid_tgid() } >> 32) as u32;
+    if pid == 0 { return 0; }
+
+    // 3rd argument = size (bytes to send)
+    let size: u64 = match unsafe { ctx.arg(2) } {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    if let Some(val) = unsafe { PID_NET_BYTES.get_ptr_mut(&pid) } {
+        unsafe { (*val).tx_bytes += size };
+    } else {
+        let _ = PID_NET_BYTES.insert(&pid, &PidNetBytes { tx_bytes: size, rx_bytes: 0 }, 0);
+    }
+    0
+}
+
+/// kprobe on tcp_recvmsg — tracks bytes received per PID.
+/// int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...)
+/// The 3rd argument (len) is the buffer size, not actual bytes received.
+/// We use it as an approximation; the actual received bytes are in the return value
+/// which we'd need a kretprobe for. This gives an upper bound.
+#[kprobe]
+pub fn tcp_recvmsg(ctx: ProbeContext) -> u32 {
+    let pid = (unsafe { bpf_get_current_pid_tgid() } >> 32) as u32;
+    if pid == 0 { return 0; }
+
+    let size: u64 = match unsafe { ctx.arg(2) } {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    if let Some(val) = unsafe { PID_NET_BYTES.get_ptr_mut(&pid) } {
+        unsafe { (*val).rx_bytes += size };
+    } else {
+        let _ = PID_NET_BYTES.insert(&pid, &PidNetBytes { tx_bytes: 0, rx_bytes: size }, 0);
+    }
+    0
 }
 
 // ─── Panic handler ───────────────────────────────────────────────
