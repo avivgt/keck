@@ -14,6 +14,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -116,6 +117,11 @@ func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Ensure agent DaemonSet
 	if err := r.ensureAgentDaemonSet(ctx, &keck); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring agent DaemonSet: %w", err)
+	}
+
+	// Ensure nginx TLS config for controller proxy
+	if err := r.ensureNginxConfig(ctx); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensuring nginx config: %w", err)
 	}
 
 	// Ensure controller Deployment
@@ -559,6 +565,34 @@ func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, 
 							},
 							Resources: controllerResources(keck),
 						},
+						{
+							Name:    "tls-proxy",
+							Image:   "nginxinc/nginx-unprivileged:alpine",
+							Command: []string{"nginx", "-g", "daemon off;"},
+							Ports: []corev1.ContainerPort{
+								{Name: "https", ContainerPort: 9443, Protocol: corev1.ProtocolTCP},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "tls", MountPath: "/etc/tls", ReadOnly: true},
+								{Name: "nginx-conf", MountPath: "/etc/nginx/nginx.conf", SubPath: "nginx.conf", ReadOnly: true},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "tls",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{SecretName: "keck-controller-tls"},
+							},
+						},
+						{
+							Name: "nginx-conf",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: "keck-controller-nginx"},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -578,12 +612,53 @@ func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, 
 	return r.Update(ctx, existing)
 }
 
+func (r *KeckClusterReconciler) ensureNginxConfig(ctx context.Context) error {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "keck-controller-nginx",
+			Namespace: keckNamespace,
+			Labels:    commonLabels(),
+		},
+		Data: map[string]string{
+			"nginx.conf": `pid /tmp/nginx.pid;
+worker_processes 1;
+events { worker_connections 1024; }
+http {
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    fastcgi_temp_path /tmp/fastcgi;
+    uwsgi_temp_path /tmp/uwsgi;
+    scgi_temp_path /tmp/scgi;
+    server {
+        listen 9443 ssl;
+        ssl_certificate /etc/tls/tls.crt;
+        ssl_certificate_key /etc/tls/tls.key;
+        location / {
+            proxy_pass http://localhost:8080;
+        }
+    }
+}
+`,
+		},
+	}
+
+	existing := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{Name: cm.Name, Namespace: cm.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, cm)
+	}
+	return err
+}
+
 func (r *KeckClusterReconciler) ensureControllerService(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "keck-controller",
 			Namespace: keckNamespace,
 			Labels:    controllerLabels(),
+			Annotations: map[string]string{
+				"service.beta.openshift.io/serving-cert-secret-name": "keck-controller-tls",
+			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
@@ -593,6 +668,7 @@ func (r *KeckClusterReconciler) ensureControllerService(ctx context.Context, kec
 			Ports: []corev1.ServicePort{
 				{Name: "grpc", Port: 9090, Protocol: corev1.ProtocolTCP},
 				{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+				{Name: "https", Port: 9443, TargetPort: intstr.FromInt(9443), Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}
@@ -602,7 +678,15 @@ func (r *KeckClusterReconciler) ensureControllerService(ctx context.Context, kec
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, svc)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	existing.Spec.Ports = svc.Spec.Ports
+	if existing.Annotations == nil {
+		existing.Annotations = map[string]string{}
+	}
+	existing.Annotations["service.beta.openshift.io/serving-cert-secret-name"] = "keck-controller-tls"
+	return r.Update(ctx, existing)
 }
 
 func (r *KeckClusterReconciler) updateStatus(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
