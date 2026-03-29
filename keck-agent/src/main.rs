@@ -330,7 +330,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if is_better(&gpu_best, &cr) { gpu_best = Some(cr); }
                 }
                 Component::Platform => {
-                    if is_better(&platform_reading, &cr) { platform_reading = Some(cr); }
+                    // For Platform, prefer PSU Total (highest value = full server power)
+                    // over subsystem readings (Platform Subsystem = chipset only)
+                    match &platform_reading {
+                        None => platform_reading = Some(cr),
+                        Some(existing) => {
+                            if cr.power_uw > existing.power_uw {
+                                platform_reading = Some(cr);
+                            }
+                        }
+                    }
                 }
                 Component::Nic => {
                     if is_better(&io_best, &cr) { io_best = Some(cr); }
