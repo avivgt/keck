@@ -39,6 +39,8 @@ struct NodePowerReport {
     memory_uw: u64,
     gpu_uw: u64,
     platform_uw: Option<u64>,
+    #[serde(default)]
+    psu_output_uw: Option<u64>,
     idle_uw: u64,
     error_ratio: f64,
     pod_count: u32,
@@ -377,10 +379,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let storage_uw = storage_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
         let fan_uw = fan_best.as_ref().map(|r| r.power_uw).unwrap_or(0);
 
-        let total_attributed = cpu_uw + mem_uw + gpu_uw + io_uw + storage_uw + fan_uw;
-        let idle_uw = platform_uw.map(|p| p.saturating_sub(total_attributed)).unwrap_or(0);
+        // PSU output = sum of all PSU output source readings (DC side)
+        let psu_output_uw: Option<u64> = {
+            let total: u64 = all_source_readings.iter()
+                .filter(|(name, _, _, available, _)| *available && name.contains("Output"))
+                .map(|(_, _, _, _, power)| *power)
+                .sum();
+            if total > 0 { Some(total) } else { None }
+        };
 
-        let error_ratio = if let Some(p) = platform_uw {
+        let total_attributed = cpu_uw + mem_uw + gpu_uw + io_uw + storage_uw + fan_uw;
+        // Use PSU output (DC) for idle calculation when available, otherwise PSU input (AC)
+        let reference_power = psu_output_uw.or(platform_uw);
+        let idle_uw = reference_power.map(|p| p.saturating_sub(total_attributed)).unwrap_or(0);
+
+        let error_ratio = if let Some(p) = reference_power {
             if p > 0 {
                 (p as i64 - total_attributed as i64).unsigned_abs() as f64 / p as f64
             } else {
@@ -484,6 +497,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 memory_uw: mem_uw,
                 gpu_uw,
                 platform_uw,
+                psu_output_uw,
                 idle_uw,
                 error_ratio,
                 pod_count,
