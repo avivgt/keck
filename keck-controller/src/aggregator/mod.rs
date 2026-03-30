@@ -41,6 +41,8 @@ pub struct NodePowerReport {
     pub memory_uw: u64,
     pub gpu_uw: u64,
     pub platform_uw: Option<u64>,
+    #[serde(default)]
+    pub psu_output_uw: Option<u64>,
     pub idle_uw: u64,
     pub error_ratio: f64,
     pub pod_count: u32,
@@ -109,6 +111,8 @@ pub struct ClusterPower {
     pub memory_uw: u64,
     pub gpu_uw: u64,
     pub platform_uw: u64,
+    pub psu_output_uw: u64,
+    pub psu_loss_uw: u64,
     pub idle_uw: u64,
     pub total_attributed_uw: u64,
     pub node_count: usize,
@@ -124,11 +128,11 @@ pub struct NodeSummary {
     pub memory_uw: u64,
     pub gpu_uw: u64,
     pub platform_uw: Option<u64>,
+    pub psu_output_uw: Option<u64>,
     pub idle_uw: u64,
     pub error_ratio: f64,
     pub pod_count: u32,
     /// Available power headroom (for scheduler)
-    /// platform_uw - (cpu + memory + gpu)
     pub headroom_uw: Option<u64>,
     pub cpu_source: String,
     pub cpu_reading_type: String,
@@ -224,6 +228,7 @@ impl ClusterAggregator {
         let mut memory = 0u64;
         let mut gpu = 0u64;
         let mut platform = 0u64;
+        let mut psu_output = 0u64;
         let mut idle = 0u64;
         let mut error_sum = 0.0f64;
         let mut node_count = 0usize;
@@ -233,12 +238,14 @@ impl ClusterAggregator {
             memory += state.report.memory_uw;
             gpu += state.report.gpu_uw;
             platform += state.report.platform_uw.unwrap_or(0);
+            psu_output += state.report.psu_output_uw.unwrap_or(0);
             idle += state.report.idle_uw;
             error_sum += state.report.error_ratio;
             node_count += 1;
         }
 
         let total_attributed = cpu + memory + gpu;
+        let psu_loss = platform.saturating_sub(psu_output);
         let avg_error = if node_count > 0 {
             error_sum / node_count as f64
         } else {
@@ -250,6 +257,8 @@ impl ClusterAggregator {
             memory_uw: memory,
             gpu_uw: gpu,
             platform_uw: platform,
+            psu_output_uw: psu_output,
+            psu_loss_uw: psu_loss,
             idle_uw: idle,
             total_attributed_uw: total_attributed,
             node_count,
@@ -314,6 +323,7 @@ impl ClusterAggregator {
                     memory_uw: r.memory_uw,
                     gpu_uw: r.gpu_uw,
                     platform_uw: r.platform_uw,
+                    psu_output_uw: r.psu_output_uw,
                     idle_uw: r.idle_uw,
                     error_ratio: r.error_ratio,
                     pod_count: r.pod_count,
