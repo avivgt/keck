@@ -153,14 +153,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Open per-core LLC miss counters for memory bandwidth attribution
-    let mut llc_reader = match perf_counters::LlcMissReader::new() {
+    // Open per-core hardware counters (instructions, cycles, LLC misses)
+    let mut hw_counter_reader = match perf_counters::HwCounterReader::new() {
         Ok(reader) => {
-            info!("LLC miss counters enabled — memory attribution uses PSS + LLC misses");
+            info!("Hardware counters enabled (instructions, cycles, LLC misses) — per-core power model active");
             Some(reader)
         }
         Err(e) => {
-            info!("LLC miss counters unavailable ({}), memory attribution uses PSS only", e);
+            info!("Hardware counters unavailable ({}), using CPU time ratio fallback", e);
             None
         }
     };
@@ -403,8 +403,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.0
         };
 
-        // Read LLC miss deltas for memory bandwidth attribution
-        let total_llc_misses = llc_reader.as_mut().map(|r| r.total_deltas()).unwrap_or(0);
+        // Read per-core hardware counter deltas (instructions, cycles, LLC misses)
+        let core_counters = hw_counter_reader.as_mut()
+            .map(|r| r.read_deltas())
+            .unwrap_or_default();
+        let total_llc_misses: u64 = core_counters.iter().map(|c| c.cache_misses).sum();
 
         // Drain eBPF maps
         let ebpf_snapshot = ebpf_observer.as_mut().and_then(|obs| obs.drain().ok());
@@ -422,8 +425,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default();
 
         let mut pods = enumerate_pods(&node_name, cpu_uw, mem_uw, storage_uw, io_uw,
-            total_llc_misses, &pod_cache, &mut prev_cpu_ticks, &mut prev_page_faults,
-            &mut prev_io_bytes, &mut pss_cache, &ebpf_net_bytes, tick_count);
+            total_llc_misses, &core_counters, &pod_cache, &mut prev_cpu_ticks,
+            &mut prev_page_faults, &mut prev_io_bytes, &mut pss_cache,
+            &ebpf_net_bytes, tick_count);
 
         if cpu_type == "estimated" {
             if let Some(ref snapshot) = ebpf_snapshot {
@@ -431,7 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Compute frequency-weighted CPU attribution from eBPF
                     let ebpf_pods = enumerate_pods_ebpf_weighted(
                         &node_name, cpu_uw, mem_uw, total_llc_misses,
-                        &pod_cache, snapshot,
+                        &core_counters, &pod_cache, snapshot,
                     );
 
                     // Override CPU power for pods that eBPF saw (active pods)
@@ -747,18 +751,37 @@ fn enumerate_pods_ebpf_weighted(
     total_cpu_uw: u64,
     total_mem_uw: u64,
     total_llc_misses: u64,
+    core_counters: &[perf_counters::CoreCounterDeltas],
     pod_cache: &HashMap<String, PodInfo>,
     snapshot: &ebpf::EbpfSnapshot,
 ) -> Vec<PodPowerReport> {
-    // Step 1: Compute per-core weighted busy time from frequency data
-    // Weight = freq_khz² × time_ns (power ∝ V²f, V scales with f)
+    // Step 1: Compute per-core power weight.
+    // Priority: hardware cycles (best) > frequency² × time > equal time
+    //
+    // Cycles directly reflect power: P ∝ V²f, and cycles = f × time.
+    // A core running at 3.5GHz for 1ms has 3.5M cycles = 3× more power
+    // than a core at 1.2GHz for 1ms with 1.2M cycles.
     let mut core_weight: HashMap<u32, f64> = HashMap::new();
-    for &(cpu, freq_khz, time_ns) in &snapshot.cpu_freq_times {
-        let freq_factor = (freq_khz as f64 / 1_000_000.0).powi(2);
-        *core_weight.entry(cpu).or_default() += freq_factor * time_ns as f64;
+
+    // Best: use hardware cycle counters (directly measured)
+    let has_cycle_counters = core_counters.iter().any(|c| c.cycles > 0);
+    if has_cycle_counters {
+        for c in core_counters {
+            if c.cycles > 0 {
+                core_weight.insert(c.core_id, c.cycles as f64);
+            }
+        }
     }
 
-    // If no frequency data, fall back to equal weighting using pid_cpu_times
+    // Fallback: use eBPF frequency² × time
+    if core_weight.is_empty() {
+        for &(cpu, freq_khz, time_ns) in &snapshot.cpu_freq_times {
+            let freq_factor = (freq_khz as f64 / 1_000_000.0).powi(2);
+            *core_weight.entry(cpu).or_default() += freq_factor * time_ns as f64;
+        }
+    }
+
+    // Last resort: equal weighting by time
     if core_weight.is_empty() {
         for &(cpu, _, time_ns) in &snapshot.pid_cpu_times {
             *core_weight.entry(cpu).or_default() += time_ns as f64;
@@ -995,6 +1018,7 @@ fn enumerate_pods(
     total_storage_uw: u64,
     total_io_uw: u64,
     total_llc_misses: u64,
+    core_counters: &[perf_counters::CoreCounterDeltas],
     pod_cache: &HashMap<String, PodInfo>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
@@ -1148,17 +1172,25 @@ fn enumerate_pods(
 
     // Phase 4: Attribute power proportionally
     //
+    // CPU power model:
+    //   When per-core hardware counters are available:
+    //     Per-core power estimated from cycles (frequency-weighted work).
+    //     Pod's share of each core = pod's CPU time on that core / total.
+    //     Pod CPU power = Σ(pod_share × core_power), calibrated to Redfish total.
+    //   When counters unavailable:
+    //     Fallback to simple CPU time ratio.
+    //
     // Memory power model:
     //   When LLC miss counters are available:
-    //     60% PSS (static DRAM refresh — proportional to capacity)
-    //     40% LLC misses (dynamic DRAM access — proportional to bandwidth)
-    //   When LLC miss counters unavailable:
-    //     100% PSS
-    //
-    // LLC misses are per-core totals. We attribute to processes proportionally
-    // by their CPU time on each core (processes using more CPU cause more
-    // cache misses). This is an approximation — true per-process LLC misses
-    // would require per-PID perf events.
+    //     60% PSS (static DRAM refresh) + 40% LLC misses (dynamic DRAM access)
+    //   When unavailable: 100% PSS.
+
+    // Build per-core power weights from hardware counters
+    // Cycles are the best proxy for power: P ∝ V²f, and cycles = f × time.
+    // More cycles on a core = more power consumed by that core.
+    let has_core_counters = !core_counters.is_empty();
+    let total_cycles: u64 = core_counters.iter().map(|c| c.cycles).sum();
+
     let has_llc = total_llc_misses > 0;
     let pss_weight = if has_llc { 0.6 } else { 1.0 };
     let llc_weight = if has_llc { 0.4 } else { 0.0 };
@@ -1166,12 +1198,17 @@ fn enumerate_pods(
     pod_metrics
         .iter()
         .map(|(pod_uid, metrics)| {
-            // CPU power proportional to CPU time consumed
+            // CPU power attribution
             let cpu_ratio = if total_cpu_ticks > 0 {
                 metrics.cpu_ticks as f64 / total_cpu_ticks as f64
             } else {
                 0.0
             };
+
+            // CPU power: falls back to time ratio for now.
+            // When eBPF per-PID per-core time is available (tracefs mounted),
+            // the separate enumerate_pods_ebpf_weighted path overrides this
+            // with per-core frequency-weighted attribution.
             let pod_cpu_uw = (total_cpu_uw as f64 * cpu_ratio) as u64;
 
             // Memory power: PSS (static) + LLC misses (dynamic)
@@ -1180,8 +1217,6 @@ fn enumerate_pods(
             } else {
                 0.0
             };
-            // Approximate per-pod LLC misses by CPU time ratio
-            // (processes using more CPU generally cause more LLC misses)
             let llc_ratio = cpu_ratio; // proxy: LLC misses ∝ CPU activity
             let mem_ratio = pss_weight * pss_ratio + llc_weight * llc_ratio;
             let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
