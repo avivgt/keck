@@ -463,6 +463,7 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "proc", MountPath: "/host/proc", ReadOnly: true},
 								{Name: "sys", MountPath: "/host/sys", ReadOnly: true},
+								{Name: "tracefs", MountPath: "/sys/kernel/tracing", ReadOnly: true},
 							},
 							Ports: []corev1.ContainerPort{
 								{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP},
@@ -477,6 +478,10 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 						{
 							Name:         "sys",
 							VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}},
+						},
+						{
+							Name:         "tracefs",
+							VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys/kernel/tracing"}},
 						},
 					},
 				},
