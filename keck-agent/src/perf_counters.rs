@@ -1,26 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-core hardware performance counter reader for LLC misses.
+//! Per-core hardware performance counter reader.
 //!
-//! Opens perf_event_open per CPU core to read LLC cache misses.
-//! Each LLC miss = one DRAM access = dynamic memory power cost.
+//! Opens perf_event_open per CPU core for multiple hardware counters:
+//! - Instructions retired (actual work done)
+//! - CPU cycles (frequency-weighted time)
+//! - LLC cache misses (DRAM access proxy)
 //!
-//! Combined with eBPF sched_switch per-PID per-core time data,
-//! LLC misses can be attributed to individual processes proportionally.
+//! Combined with eBPF sched_switch per-PID per-core time, these counters
+//! enable accurate per-process power attribution:
+//!   core_power = f(instructions, cycles, cache_misses)
+//!   pid_share = pid_time_on_core / total_time_on_core
+//!   pid_power += pid_share × core_power
 
 use std::os::unix::io::RawFd;
 
-/// Per-core LLC miss counter.
-pub struct LlcMissReader {
-    fds: Vec<(u32, RawFd)>, // (core_id, fd)
-    prev_values: Vec<(u32, u64)>,
+/// Per-core snapshot of hardware counter deltas.
+#[derive(Clone, Debug)]
+pub struct CoreCounterDeltas {
+    pub core_id: u32,
+    pub instructions: u64,
+    pub cycles: u64,
+    pub cache_misses: u64,
+}
+
+/// Per-core hardware counter reader — instructions, cycles, LLC misses.
+pub struct HwCounterReader {
+    cores: Vec<CoreFds>,
+    prev: Vec<CoreSnapshot>,
+}
+
+struct CoreFds {
+    core_id: u32,
+    instructions_fd: RawFd,
+    cycles_fd: RawFd,
+    cache_misses_fd: RawFd,
+}
+
+struct CoreSnapshot {
+    instructions: u64,
+    cycles: u64,
+    cache_misses: u64,
 }
 
 /// perf_event_attr constants
 const PERF_TYPE_HARDWARE: u32 = 0;
+const PERF_COUNT_HW_INSTRUCTIONS: u64 = 0;
+const PERF_COUNT_HW_CPU_CYCLES: u64 = 1;
 const PERF_COUNT_HW_CACHE_MISSES: u64 = 3;
 
-/// Simplified perf_event_attr — zeroed to match kernel expectations.
 #[repr(C)]
 struct PerfEventAttr {
     type_: u32,
@@ -35,67 +63,106 @@ impl PerfEventAttr {
     }
 }
 
-impl LlcMissReader {
-    /// Open LLC miss counters on all online CPUs.
+impl HwCounterReader {
+    /// Open hardware counters on all online CPUs.
     /// Requires CAP_PERFMON or privileged container.
     pub fn new() -> Result<Self, String> {
         let num_cores = num_online_cpus().map_err(|e| format!("CPU count: {}", e))?;
 
-        let mut fds = Vec::new();
+        let mut cores = Vec::new();
         for cpu in 0..num_cores {
-            match perf_event_open_llc(cpu as i32) {
-                Ok(fd) => fds.push((cpu as u32, fd)),
-                Err(e) => {
-                    // Clean up already opened FDs
-                    for (_, fd) in &fds {
-                        unsafe { libc::close(*fd); }
-                    }
-                    return Err(format!("perf_event_open on CPU {}: {}", cpu, e));
-                }
-            }
+            let cpu_i = cpu as i32;
+            let instructions_fd = perf_event_open(cpu_i, PERF_COUNT_HW_INSTRUCTIONS)
+                .map_err(|e| {
+                    // Clean up on failure
+                    for c in &cores { close_core_fds(c); }
+                    format!("instructions on CPU {}: {}", cpu, e)
+                })?;
+            let cycles_fd = perf_event_open(cpu_i, PERF_COUNT_HW_CPU_CYCLES)
+                .map_err(|e| {
+                    unsafe { libc::close(instructions_fd); }
+                    for c in &cores { close_core_fds(c); }
+                    format!("cycles on CPU {}: {}", cpu, e)
+                })?;
+            let cache_misses_fd = perf_event_open(cpu_i, PERF_COUNT_HW_CACHE_MISSES)
+                .map_err(|e| {
+                    unsafe { libc::close(instructions_fd); libc::close(cycles_fd); }
+                    for c in &cores { close_core_fds(c); }
+                    format!("cache_misses on CPU {}: {}", cpu, e)
+                })?;
+
+            cores.push(CoreFds {
+                core_id: cpu as u32,
+                instructions_fd,
+                cycles_fd,
+                cache_misses_fd,
+            });
         }
 
-        let prev_values = fds.iter().map(|&(cpu, _)| (cpu, 0u64)).collect();
+        let prev = cores.iter().map(|_| CoreSnapshot {
+            instructions: 0,
+            cycles: 0,
+            cache_misses: 0,
+        }).collect();
 
-        log::info!("LLC miss counters opened on {} cores", fds.len());
-        Ok(Self { fds, prev_values })
+        log::info!("Hardware counters opened on {} cores (instructions, cycles, LLC misses)", cores.len());
+        Ok(Self { cores, prev })
     }
 
-    /// Read LLC miss deltas since last read, per core.
-    /// Returns Vec<(core_id, llc_miss_delta)>.
-    pub fn read_deltas(&mut self) -> Vec<(u32, u64)> {
-        let mut deltas = Vec::with_capacity(self.fds.len());
+    /// Read per-core counter deltas since last read.
+    pub fn read_deltas(&mut self) -> Vec<CoreCounterDeltas> {
+        let mut deltas = Vec::with_capacity(self.cores.len());
 
-        for (i, &(cpu, fd)) in self.fds.iter().enumerate() {
-            let current = read_counter(fd).unwrap_or(0);
-            let prev = self.prev_values[i].1;
-            let delta = current.saturating_sub(prev);
-            self.prev_values[i].1 = current;
-            deltas.push((cpu, delta));
+        for (i, core) in self.cores.iter().enumerate() {
+            let instr = read_counter(core.instructions_fd).unwrap_or(0);
+            let cyc = read_counter(core.cycles_fd).unwrap_or(0);
+            let miss = read_counter(core.cache_misses_fd).unwrap_or(0);
+
+            let prev = &self.prev[i];
+            deltas.push(CoreCounterDeltas {
+                core_id: core.core_id,
+                instructions: instr.saturating_sub(prev.instructions),
+                cycles: cyc.saturating_sub(prev.cycles),
+                cache_misses: miss.saturating_sub(prev.cache_misses),
+            });
+
+            self.prev[i] = CoreSnapshot {
+                instructions: instr,
+                cycles: cyc,
+                cache_misses: miss,
+            };
         }
 
         deltas
     }
 
-    /// Total LLC misses across all cores (delta since last read).
+    /// Total LLC misses across all cores (backward-compatible with old API).
     pub fn total_deltas(&mut self) -> u64 {
-        self.read_deltas().iter().map(|&(_, d)| d).sum()
+        self.read_deltas().iter().map(|d| d.cache_misses).sum()
     }
 }
 
-impl Drop for LlcMissReader {
+impl Drop for HwCounterReader {
     fn drop(&mut self) {
-        for &(_, fd) in &self.fds {
-            unsafe { libc::close(fd); }
+        for core in &self.cores {
+            close_core_fds(core);
         }
     }
 }
 
-fn perf_event_open_llc(cpu: i32) -> Result<RawFd, std::io::Error> {
+fn close_core_fds(core: &CoreFds) {
+    unsafe {
+        libc::close(core.instructions_fd);
+        libc::close(core.cycles_fd);
+        libc::close(core.cache_misses_fd);
+    }
+}
+
+fn perf_event_open(cpu: i32, config: u64) -> Result<RawFd, std::io::Error> {
     let mut attr = PerfEventAttr::new();
     attr.type_ = PERF_TYPE_HARDWARE;
     attr.size = std::mem::size_of::<PerfEventAttr>() as u32;
-    attr.config = PERF_COUNT_HW_CACHE_MISSES;
+    attr.config = config;
 
     let fd = unsafe {
         libc::syscall(
