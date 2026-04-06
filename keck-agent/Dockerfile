@@ -11,14 +11,13 @@ RUN cargo install bpf-linker
 
 WORKDIR /build
 
-# Copy only what the agent needs
-COPY Cargo.toml ./
+# Create workspace Cargo.toml first (cacheable)
+RUN printf '[workspace]\nresolver = "2"\nmembers = ["keck-common", "keck-ebpf", "keck-agent"]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\nlicense = "Apache-2.0"\n\n[workspace.dependencies]\nthiserror = "2"\nlog = "0.4"\n' > Cargo.toml
+
+# Copy source — any change here busts the cargo build cache
 COPY keck-common/ keck-common/
 COPY keck-ebpf/ keck-ebpf/
 COPY keck-agent/ keck-agent/
-
-# Create minimal workspace Cargo.toml for agent only
-RUN printf '[workspace]\nresolver = "2"\nmembers = ["keck-common", "keck-ebpf", "keck-agent"]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\nlicense = "Apache-2.0"\n\n[workspace.dependencies]\nthiserror = "2"\nlog = "0.4"\n' > Cargo.toml
 
 # Build the agent (includes eBPF compilation via aya-build)
 RUN cargo build --release -p keck-agent
