@@ -72,29 +72,37 @@ impl EbpfObserver {
         // Attach tcp_sendmsg kprobe (optional — network I/O tracking)
         match bpf.program_mut("tcp_sendmsg") {
             Some(prog) => {
-                let kprobe: &mut KProbe = prog.try_into()
-                    .map_err(|e| ObserverError::Ebpf(format!("tcp_sendmsg cast: {}", e)))?;
-                kprobe.load()
-                    .map_err(|e| ObserverError::Ebpf(format!("tcp_sendmsg load: {}", e)))?;
-                kprobe.attach("tcp_sendmsg", 0)
-                    .map_err(|e| ObserverError::Ebpf(format!("tcp_sendmsg attach: {}", e)))?;
-                info!("eBPF: attached tcp_sendmsg kprobe");
+                let result: Result<(), String> = (|| {
+                    let kprobe: &mut KProbe = prog.try_into()
+                        .map_err(|e| format!("cast: {}", e))?;
+                    kprobe.load().map_err(|e| format!("load: {}", e))?;
+                    kprobe.attach("tcp_sendmsg", 0).map_err(|e| format!("attach: {}", e))?;
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => info!("eBPF: attached tcp_sendmsg kprobe"),
+                    Err(e) => warn!("eBPF: tcp_sendmsg kprobe failed ({}), network TX tracking disabled", e),
+                }
             }
-            None => warn!("eBPF: tcp_sendmsg program not found, network I/O tracking disabled"),
+            None => warn!("eBPF: tcp_sendmsg program not found, network TX tracking disabled"),
         }
 
-        // Attach tcp_recvmsg kprobe
+        // Attach tcp_recvmsg kprobe (optional — network I/O tracking)
         match bpf.program_mut("tcp_recvmsg") {
             Some(prog) => {
-                let kprobe: &mut KProbe = prog.try_into()
-                    .map_err(|e| ObserverError::Ebpf(format!("tcp_recvmsg cast: {}", e)))?;
-                kprobe.load()
-                    .map_err(|e| ObserverError::Ebpf(format!("tcp_recvmsg load: {}", e)))?;
-                kprobe.attach("tcp_recvmsg", 0)
-                    .map_err(|e| ObserverError::Ebpf(format!("tcp_recvmsg attach: {}", e)))?;
-                info!("eBPF: attached tcp_recvmsg kprobe");
+                let result: Result<(), String> = (|| {
+                    let kprobe: &mut KProbe = prog.try_into()
+                        .map_err(|e| format!("cast: {}", e))?;
+                    kprobe.load().map_err(|e| format!("load: {}", e))?;
+                    kprobe.attach("tcp_recvmsg", 0).map_err(|e| format!("attach: {}", e))?;
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => info!("eBPF: attached tcp_recvmsg kprobe"),
+                    Err(e) => warn!("eBPF: tcp_recvmsg kprobe failed ({}), network RX tracking disabled", e),
+                }
             }
-            None => warn!("eBPF: tcp_recvmsg program not found, network I/O tracking disabled"),
+            None => warn!("eBPF: tcp_recvmsg program not found, network RX tracking disabled"),
         }
 
         Ok(Self { bpf })
