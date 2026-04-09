@@ -91,13 +91,22 @@ const ClusterOverview: React.FC = () => {
                 All sources and their selection status are shown in the Overview → Data Sources table.
               </p>
 
-              <p style={{ marginTop: 12 }}><strong>3. Per-process CPU attribution</strong></p>
+              <p style={{ marginTop: 12 }}><strong>3. Per-core CPU attribution (eBPF + hardware counters)</strong></p>
               <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-                The agent reads <code>/proc/[pid]/stat</code> for every process on the node,
-                computing the CPU time delta (utime + stime) between collection intervals.
-                Threads are filtered out via <code>/proc/[pid]/status</code> Tgid check
-                to prevent double-counting from goroutines and thread pools.
-                <br />Formula: pod CPU power = node CPU power × (pod CPU time delta / total CPU time delta across all processes).
+                eBPF programs attached to kernel tracepoints (<code>sched_switch</code>,{" "}
+                <code>cpu_frequency</code>) track per-PID per-core CPU time with nanosecond
+                precision and per-core frequency transitions. Hardware performance counters
+                (<code>perf_event_open</code>) measure instructions retired, CPU cycles, and
+                LLC cache misses per core.
+                <br /><br />
+                The agent selects the best attribution model based on available data:
+                <br />• <strong>Full model</strong>: weight = time × freq² × (1 + α·IPC + β·cache_miss_rate).
+                Captures compute intensity (IPC) and memory-boundedness (cache misses).
+                <br />• <strong>Frequency-weighted</strong>: weight = time × freq² (no counter data available).
+                A process at 3.5 GHz is charged ~3× more than one at 1.2 GHz for the same duration.
+                <br />• <strong>CPU time ratio</strong>: weight = time only (simplest fallback, also used with /proc when eBPF unavailable).
+                <br /><br />
+                All models guarantee energy conservation: Σ(process energy on core) = core energy.
               </p>
 
               <p style={{ marginTop: 12 }}><strong>4. Per-process memory attribution (PSS + LLC misses)</strong></p>
@@ -140,12 +149,13 @@ const ClusterOverview: React.FC = () => {
                 Namespace power = sum of all pod power within the namespace.
               </p>
 
-              <p style={{ marginTop: 12 }}><strong>7. eBPF kernel observation</strong></p>
+              <p style={{ marginTop: 12 }}><strong>7. Network I/O attribution (TCP kprobes)</strong></p>
               <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-                eBPF programs attached to <code>sched_switch</code> and <code>cpu_frequency</code>
-                tracepoints collect per-PID per-core CPU time with nanosecond precision
-                and per-core frequency transitions. This data is collected for future
-                per-core frequency-weighted attribution.
+                eBPF kprobes on <code>tcp_sendmsg</code> and <code>tcp_recvmsg</code> track
+                per-PID TCP bytes sent and received. This data is used to attribute
+                network-related power (NIC, switching fabric) to individual pods proportional
+                to their traffic. Kprobes are optional — if unavailable, the agent falls
+                back to CPU-ratio-based network attribution.
               </p>
             </div>
         </ExpandableSection>
