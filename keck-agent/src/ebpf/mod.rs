@@ -4,7 +4,6 @@
 //! and drains BPF maps for per-PID per-core CPU time data.
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::io::RawFd;
 
 use aya::maps::{HashMap as BpfHashMap, MapData};
@@ -362,6 +361,40 @@ fn num_online_cpus() -> Result<usize, String> {
     Ok(count)
 }
 
+/// Extract the raw file descriptor from an aya Map.
+///
+/// Map in aya 0.13 doesn't implement AsFd, so we get the FD via MapInfo.
+fn get_map_fd(map: &mut aya::maps::Map) -> Option<RawFd> {
+    // Map::info() returns MapInfo which contains the id. But we need the FD.
+    // The map FD is the underlying file descriptor that aya holds.
+    // In aya 0.13, we can get it by converting to a concrete map type.
+    // PerfEventArray and PerCpuArray both wrap MapData which has fd().
+    // Use the map's id to look it up via BPF_MAP_GET_FD_BY_ID.
+    let info = map.info().ok()?;
+    let id = info.id();
+    bpf_map_get_fd_by_id(id)
+}
+
+fn bpf_map_get_fd_by_id(id: u32) -> Option<RawFd> {
+    #[repr(C)]
+    struct BpfAttrGetId {
+        id: u32,
+        next_id: u32,
+        open_flags: u32,
+    }
+    let attr = BpfAttrGetId { id, next_id: 0, open_flags: 0 };
+    const BPF_MAP_GET_FD_BY_ID: u32 = 14;
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_MAP_GET_FD_BY_ID,
+            &attr as *const BpfAttrGetId,
+            std::mem::size_of::<BpfAttrGetId>(),
+        )
+    };
+    if fd < 0 { None } else { Some(fd as RawFd) }
+}
+
 /// BPF syscall constants for raw map operations
 const BPF_MAP_UPDATE_ELEM: u32 = 2;
 const BPF_ANY: u64 = 0;
@@ -421,7 +454,8 @@ fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
     for &(map_name, config) in &maps {
         let map_data = bpf.map_mut(map_name)
             .ok_or_else(|| format!("{} map not found", map_name))?;
-        let map_fd = map_data.as_fd().as_raw_fd();
+        let map_fd = get_map_fd(map_data)
+            .ok_or_else(|| format!("{}: cannot get map FD", map_name))?;
 
         for cpu in 0..num_cpus {
             let perf_fd = perf_event_open(cpu as i32, config)
@@ -444,12 +478,11 @@ fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
 
     // Enable PMC reading in the eBPF program by setting PMC_ENABLED[0] = 1
     if let Some(map_data) = bpf.map_mut("PMC_ENABLED") {
-        let map_fd = map_data.as_fd().as_raw_fd();
-        let key: u32 = 0;
-        let value: u32 = 1;
-        // PMC_ENABLED is a PerCpuArray<u32>, but we just need to write a
-        // single u32 value. Use raw bpf syscall.
-        let _ = bpf_map_update_raw(map_fd, &key as *const _ as u64, &value as *const _ as u64);
+        if let Some(map_fd) = get_map_fd(map_data) {
+            let key: u32 = 0;
+            let value: u32 = 1;
+            let _ = bpf_map_update_raw(map_fd, &key as *const _ as u64, &value as *const _ as u64);
+        }
     }
 
     Ok(fds)
