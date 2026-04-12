@@ -23,6 +23,16 @@ pub enum ObserverError {
     Ebpf(String),
 }
 
+/// Observation snapshot for the attribution engine (forward-looking type).
+/// Maps eBPF data into the format expected by AttributionEngine.
+/// TODO: wire AttributionEngine into main loop and populate this from EbpfSnapshot.
+pub struct ObservationSnapshot {
+    pub pid_cpu_times: Vec<(keck_common::PidCpuKey, u64)>,
+    pub cpu_freq_times: Vec<(keck_common::CpuFreqKey, u64)>,
+    pub core_counters: Vec<(u32, keck_common::CoreCounters)>,
+    pub pid_cgroups: HashMap<u32, u64>,
+}
+
 /// Per-PID per-core time data from eBPF.
 pub struct EbpfSnapshot {
     /// (cpu, pid) → nanoseconds on that core this interval
@@ -411,7 +421,7 @@ fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
     for &(map_name, config) in &maps {
         let map_data = bpf.map_mut(map_name)
             .ok_or_else(|| format!("{} map not found", map_name))?;
-        let map_fd = map_data.fd().as_fd().as_raw_fd();
+        let map_fd = map_data.as_fd().as_raw_fd();
 
         for cpu in 0..num_cpus {
             let perf_fd = perf_event_open(cpu as i32, config)
@@ -434,7 +444,7 @@ fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
 
     // Enable PMC reading in the eBPF program by setting PMC_ENABLED[0] = 1
     if let Some(map_data) = bpf.map_mut("PMC_ENABLED") {
-        let map_fd = map_data.fd().as_fd().as_raw_fd();
+        let map_fd = map_data.as_fd().as_raw_fd();
         let key: u32 = 0;
         let value: u32 = 1;
         // PMC_ENABLED is a PerCpuArray<u32>, but we just need to write a
