@@ -251,8 +251,8 @@ const NamespaceView: React.FC = () => {
                     <Td>{formatWatts(pod.cpu_watts)}</Td>
                     <Td>{formatWatts(pod.memory_watts)}</Td>
                     <Td>{formatWatts(pod.gpu_watts)}</Td>
-                    <Td>{formatWatts(pod.storage_watts)}</Td>
-                    <Td>{formatWatts(pod.io_watts)}</Td>
+                    <Td>{formatWatts(pod.storage_watts || 0)}</Td>
+                    <Td>{formatWatts(pod.io_watts || 0)}</Td>
                   </Tr>
                 ))}
               </Tbody>

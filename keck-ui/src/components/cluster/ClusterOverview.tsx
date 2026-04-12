@@ -211,8 +211,8 @@ const ClusterOverview: React.FC = () => {
                     <Td>{formatWatts(ns.cpu_watts)}</Td>
                     <Td>{formatWatts(ns.memory_watts)}</Td>
                     <Td>{formatWatts(ns.gpu_watts)}</Td>
-                    <Td>{formatWatts(ns.storage_watts)}</Td>
-                    <Td>{formatWatts(ns.io_watts)}</Td>
+                    <Td>{formatWatts(ns.storage_watts || 0)}</Td>
+                    <Td>{formatWatts(ns.io_watts || 0)}</Td>
                     <Td>{ns.pod_count}</Td>
                   </Tr>
                 ))}
