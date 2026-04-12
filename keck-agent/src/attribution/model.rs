@@ -67,23 +67,35 @@ pub trait AttributionModel: Send + Sync {
 /// - IPC (instructions per cycle) indicates compute intensity
 /// - cache_miss_rate indicates memory-bound behavior (higher power per cycle)
 ///
-/// α and β are tunable coefficients, defaulting to values from
-/// academic power modeling literature.
+/// α and β are tunable coefficients. Override via KECK_ALPHA / KECK_BETA
+/// environment variables.
+///
+/// Default values:
+///   α = 0.3 — IPC typically ranges 0.5–4.0, giving contribution 0.15–1.2
+///   β = 1.5 — cache miss ratio (misses/instructions) typically 0.001–0.05,
+///             giving contribution 0.0015–0.075 (comparable to α's range)
+///
+/// Note: β was previously 0.5 with miss_rate = misses_per_1000_instructions,
+/// which gave contributions of 0.5–25.0 and dominated the formula. The new
+/// formulation uses the raw ratio (misses/instructions) which is dimensionless
+/// and in the range [0, ~0.1], making β=1.5 well-scaled.
 pub struct FullModel {
     /// Weight of IPC contribution to power
     alpha: f64,
-    /// Weight of cache miss rate contribution to power
+    /// Weight of cache miss ratio contribution to power
     beta: f64,
 }
 
 impl FullModel {
     pub fn new() -> Self {
         Self {
-            // Default coefficients from power modeling literature.
-            // These can be refined via online training against RAPL.
-            alpha: 0.3, // IPC contribution
-            beta: 0.5,  // Cache miss contribution (memory is power-hungry)
+            alpha: 0.3,
+            beta: 1.5,
         }
+    }
+
+    pub fn with_coefficients(alpha: f64, beta: f64) -> Self {
+        Self { alpha, beta }
     }
 }
 
@@ -107,15 +119,15 @@ impl AttributionModel for FullModel {
                     0.0
                 };
 
-                // Cache miss rate: misses per 1000 instructions
-                let miss_rate = if obs.instructions > 0 {
-                    (obs.cache_misses as f64 / obs.instructions as f64) * 1000.0
+                // Cache miss ratio: misses / instructions (dimensionless, 0–~0.1)
+                let miss_ratio = if obs.instructions > 0 {
+                    obs.cache_misses as f64 / obs.instructions as f64
                 } else {
                     0.0
                 };
 
                 // Combined weight: base (time × freq²) × workload adjustment
-                let workload_factor = 1.0 + self.alpha * ipc + self.beta * miss_rate;
+                let workload_factor = 1.0 + self.alpha * ipc + self.beta * miss_ratio;
                 let raw_weight = time_factor * freq_factor * workload_factor;
 
                 PidCoreWeight {
