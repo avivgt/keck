@@ -80,15 +80,10 @@ impl PowerSource for RedfishSource {
                     .ok_or_else(|| SourceError::Parse("PowerConsumedWatts not found".into()))?
             }
             ReadMethod::TelemetryMetric { metric_id } => {
-                // Read from MetricReports — the value is the metric reading
-                let url = format!(
-                    "{}/redfish/v1/TelemetryService/MetricDefinitions/{}",
-                    self.endpoint, metric_id
-                );
-                self.read_json_field(&url, "Reading")
+                // Try MetricReports first (most reliable for TotalStoragePower etc.)
+                self.read_metric_from_reports(metric_id)
                     .or_else(|_| {
-                        // Some Dell firmware puts the value in a different location
-                        // Try the sensor with same name
+                        // Fallback: try the sensor with same name
                         let sensor_url = format!(
                             "{}/redfish/v1/Chassis/System.Embedded.1/Sensors/{}",
                             self.endpoint, metric_id
@@ -116,6 +111,58 @@ impl PowerSource for RedfishSource {
 }
 
 impl RedfishSource {
+    /// Read a metric value from TelemetryService MetricReports.
+    ///
+    /// Scans all MetricReports for an entry matching the given metric_id
+    /// and returns the most recent MetricValue as f64.
+    fn read_metric_from_reports(&self, metric_id: &str) -> Result<f64, SourceError> {
+        let reports_url = format!("{}/redfish/v1/TelemetryService/MetricReports", self.endpoint);
+        let resp = self.client.get(&reports_url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .map_err(|e| SourceError::Unavailable(format!("MetricReports: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(SourceError::Unavailable(format!("MetricReports HTTP {}", resp.status())));
+        }
+        let body: serde_json::Value = resp.json()
+            .map_err(|e| SourceError::Parse(format!("MetricReports JSON: {}", e)))?;
+
+        // Iterate over report collection members
+        let members = body.get("Members").and_then(|m| m.as_array())
+            .ok_or_else(|| SourceError::Parse("No MetricReports Members".into()))?;
+
+        for member in members {
+            let report_path = member.get("@odata.id").and_then(|v| v.as_str())
+                .ok_or_else(|| SourceError::Parse("No @odata.id".into()))?;
+            let report_url = format!("{}{}", self.endpoint, report_path);
+
+            let report_resp = self.client.get(&report_url)
+                .basic_auth(&self.username, Some(&self.password))
+                .send()
+                .map_err(|e| SourceError::Unavailable(format!("Report: {}", e)))?;
+            if !report_resp.status().is_success() { continue; }
+
+            let report: serde_json::Value = report_resp.json()
+                .map_err(|e| SourceError::Parse(format!("Report JSON: {}", e)))?;
+
+            // Search MetricValues array for our metric_id
+            if let Some(values) = report.get("MetricValues").and_then(|v| v.as_array()) {
+                // Take the last (most recent) matching entry
+                for entry in values.iter().rev() {
+                    if entry.get("MetricId").and_then(|v| v.as_str()) == Some(metric_id) {
+                        if let Some(val_str) = entry.get("MetricValue").and_then(|v| v.as_str()) {
+                            if let Ok(val) = val_str.parse::<f64>() {
+                                return Ok(val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(SourceError::Parse(format!("{} not found in MetricReports", metric_id)))
+    }
+
     fn read_json_field(&self, url: &str, field: &str) -> Result<f64, SourceError> {
         let resp = self.client.get(url)
             .basic_auth(&self.username, Some(&self.password))
@@ -319,9 +366,27 @@ fn try_telemetry_metric(
         });
     }
 
-    // MetricDefinition exists but no readable sensor — skip
-    // (definition without data is not useful)
-    log::debug!("  {} MetricDefinition exists but no sensor reading available", metric_id);
+    // MetricDefinition exists but no sensor — try MetricReports
+    // (Dell iDRAC requires TelemetryService enabled + MetricReportDefinition created)
+    let test_source = RedfishSource {
+        id: SourceId(format!("redfish:{}:{}", metric_id, endpoint)),
+        display_name: format!("{} ({})", display_prefix, endpoint),
+        component,
+        read_method: ReadMethod::TelemetryMetric {
+            metric_id: metric_id.to_string(),
+        },
+        endpoint: endpoint.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+        client: client.clone(),
+    };
+
+    // Verify we can actually read a value from MetricReports
+    if test_source.read_metric_from_reports(metric_id).is_ok() {
+        return Some(test_source);
+    }
+
+    log::debug!("  {} MetricDefinition exists but no sensor or report data available", metric_id);
     None
 }
 
