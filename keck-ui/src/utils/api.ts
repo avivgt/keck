@@ -30,6 +30,8 @@ export interface NamespacePower {
   cpu_watts: number;
   memory_watts: number;
   gpu_watts: number;
+  storage_watts: number;
+  io_watts: number;
   total_watts: number;
   pod_count: number;
 }
@@ -54,6 +56,8 @@ export interface PodPower {
   cpu_watts: number;
   memory_watts: number;
   gpu_watts: number;
+  storage_watts: number;
+  io_watts: number;
   total_watts: number;
 }
 

@@ -41,7 +41,7 @@ function getNamespaceFromURL(): string {
   return "";
 }
 
-type PodSortKey = "pod_name" | "node_name" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts";
+type PodSortKey = "pod_name" | "node_name" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "storage_watts" | "io_watts";
 
 const NamespaceView: React.FC = () => {
   const [ns, setNs] = React.useState(() => getNamespaceFromURL());
@@ -216,7 +216,7 @@ const NamespaceView: React.FC = () => {
 
       <PageSection>
         {pods.length > 0 ? (() => {
-          const cols: PodSortKey[] = ["pod_name", "node_name", "total_watts", "cpu_watts", "memory_watts", "gpu_watts"];
+          const cols: PodSortKey[] = ["pod_name", "node_name", "total_watts", "cpu_watts", "memory_watts", "gpu_watts", "storage_watts", "io_watts"];
           const sorted = [...pods].sort((a, b) => {
             const av = (a as any)[sortBy];
             const bv = (b as any)[sortBy];
@@ -238,6 +238,8 @@ const NamespaceView: React.FC = () => {
                   <Th sort={getSortParams("cpu_watts")}>CPU</Th>
                   <Th sort={getSortParams("memory_watts")}>Memory</Th>
                   <Th sort={getSortParams("gpu_watts")}>GPU</Th>
+                  <Th sort={getSortParams("storage_watts")}>Storage</Th>
+                  <Th sort={getSortParams("io_watts")}>Network</Th>
                 </Tr>
               </Thead>
               <Tbody>
@@ -249,6 +251,8 @@ const NamespaceView: React.FC = () => {
                     <Td>{formatWatts(pod.cpu_watts)}</Td>
                     <Td>{formatWatts(pod.memory_watts)}</Td>
                     <Td>{formatWatts(pod.gpu_watts)}</Td>
+                    <Td>{formatWatts(pod.storage_watts)}</Td>
+                    <Td>{formatWatts(pod.io_watts)}</Td>
                   </Tr>
                 ))}
               </Tbody>
