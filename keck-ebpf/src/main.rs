@@ -170,7 +170,7 @@ fn read_perf_counter(map: &PerfEventArray<u64>, cpu: u32) -> u64 {
     let map_ptr = map as *const _ as *mut core::ffi::c_void;
     let result = unsafe {
         // Use BPF_F_INDEX_MASK to read from the current CPU's perf event
-        aya_ebpf::helpers::gen::bpf_perf_event_read(map_ptr, cpu as u64)
+        aya_ebpf::helpers::r#gen::bpf_perf_event_read(map_ptr, cpu as u64)
     };
     if result < 0 {
         0 // Perf event not attached or error — return 0
