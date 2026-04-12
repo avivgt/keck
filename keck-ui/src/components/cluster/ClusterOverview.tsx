@@ -29,7 +29,7 @@ import {
 import { api, NamespacePower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
 
-type SortKey = "namespace" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "pod_count";
+type SortKey = "namespace" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "storage_watts" | "io_watts" | "pod_count";
 
 const ClusterOverview: React.FC = () => {
   const [namespaces, setNamespaces] = React.useState<NamespacePower[]>([]);
@@ -172,16 +172,17 @@ const ClusterOverview: React.FC = () => {
             return sortDir === "asc" ? av - bv : bv - av;
           });
 
+          const cols: SortKey[] = ["namespace", "total_watts", "cpu_watts", "memory_watts", "gpu_watts", "storage_watts", "io_watts", "pod_count"];
           const getSortParams = (key: SortKey): ThProps["sort"] => ({
             sortBy: {
-              index: ["namespace", "total_watts", "cpu_watts", "memory_watts", "gpu_watts", "pod_count"].indexOf(sortBy),
+              index: cols.indexOf(sortBy),
               direction: sortDir,
             },
             onSort: (_e, _idx, dir) => {
               setSortBy(key);
               setSortDir(dir as "asc" | "desc");
             },
-            columnIndex: ["namespace", "total_watts", "cpu_watts", "memory_watts", "gpu_watts", "pod_count"].indexOf(key),
+            columnIndex: cols.indexOf(key),
           });
 
           return (
@@ -193,6 +194,8 @@ const ClusterOverview: React.FC = () => {
                   <Th sort={getSortParams("cpu_watts")}>CPU</Th>
                   <Th sort={getSortParams("memory_watts")}>Memory</Th>
                   <Th sort={getSortParams("gpu_watts")}>GPU</Th>
+                  <Th sort={getSortParams("storage_watts")}>Storage</Th>
+                  <Th sort={getSortParams("io_watts")}>Network</Th>
                   <Th sort={getSortParams("pod_count")}>Pods</Th>
                 </Tr>
               </Thead>
@@ -208,6 +211,8 @@ const ClusterOverview: React.FC = () => {
                     <Td>{formatWatts(ns.cpu_watts)}</Td>
                     <Td>{formatWatts(ns.memory_watts)}</Td>
                     <Td>{formatWatts(ns.gpu_watts)}</Td>
+                    <Td>{formatWatts(ns.storage_watts)}</Td>
+                    <Td>{formatWatts(ns.io_watts)}</Td>
                     <Td>{ns.pod_count}</Td>
                   </Tr>
                 ))}
