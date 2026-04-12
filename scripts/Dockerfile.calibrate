@@ -1,0 +1,15 @@
+# Calibration workload image for Keck alpha/beta coefficient tuning.
+#
+# Provides stress-ng for controlled workload profiles:
+#   Compute-heavy: stress-ng --matrix 1 --matrix-size 128
+#   Memory-heavy:  stress-ng --stream 1 --stream-l3-size 32M
+#   Mixed:         stress-ng --cpu 1 --vm 1 --vm-bytes 128M
+#
+# Build:
+#   podman build -t quay.io/aguetta/keck-calibrate:latest -f scripts/Dockerfile.calibrate .
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+RUN microdnf install -y stress-ng perf && microdnf clean all
+
+USER 1001
+ENTRYPOINT ["stress-ng"]

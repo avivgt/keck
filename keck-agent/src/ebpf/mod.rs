@@ -4,12 +4,16 @@
 //! and drains BPF maps for per-PID per-core CPU time data.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::io::RawFd;
 
 use aya::maps::{HashMap as BpfHashMap, MapData};
 use aya::programs::{KProbe, TracePoint};
 use aya::{Ebpf, EbpfLoader};
-use keck_common::{CpuFreqKey, CpuFreqTime, PidCgroupValue, PidCpuKey, PidCpuTime, PidNetBytes};
+use keck_common::{
+    CpuFreqKey, CpuFreqTime, PidCgroupValue, PidCpuCounterKey, PidCpuCounters,
+    PidCpuKey, PidCpuTime, PidNetBytes,
+};
 use log::{info, warn};
 use thiserror::Error;
 
@@ -29,10 +33,16 @@ pub struct EbpfSnapshot {
     pub pid_cgroups: HashMap<u32, u64>,
     /// pid → (tx_bytes, rx_bytes) network I/O
     pub pid_net_bytes: HashMap<u32, (u64, u64)>,
+    /// (cpu, pid) → (instructions, cycles, cache_misses) per-PID hardware counters
+    pub pid_hw_counters: HashMap<(u32, u32), (u64, u64, u64)>,
 }
 
 pub struct EbpfObserver {
     bpf: Ebpf,
+    /// Whether per-PID PMC tracking is active (perf FDs attached to BPF maps)
+    pid_pmc_active: bool,
+    /// Perf event FDs attached to BPF maps (kept open for lifetime of observer)
+    perf_fds: Vec<RawFd>,
 }
 
 impl EbpfObserver {
@@ -87,7 +97,8 @@ impl EbpfObserver {
             None => warn!("eBPF: tcp_sendmsg program not found, network TX tracking disabled"),
         }
 
-        // Attach tcp_recvmsg kprobe (optional — network I/O tracking)
+        // Attach tcp_recvmsg kretprobe (optional — network I/O tracking)
+        // Uses kretprobe to read actual received bytes from return value
         match bpf.program_mut("tcp_recvmsg") {
             Some(prog) => {
                 let result: Result<(), String> = (|| {
@@ -98,14 +109,31 @@ impl EbpfObserver {
                     Ok(())
                 })();
                 match result {
-                    Ok(()) => info!("eBPF: attached tcp_recvmsg kprobe"),
-                    Err(e) => warn!("eBPF: tcp_recvmsg kprobe failed ({}), network RX tracking disabled", e),
+                    Ok(()) => info!("eBPF: attached tcp_recvmsg kretprobe"),
+                    Err(e) => warn!("eBPF: tcp_recvmsg kretprobe failed ({}), network RX tracking disabled", e),
                 }
             }
             None => warn!("eBPF: tcp_recvmsg program not found, network RX tracking disabled"),
         }
 
-        Ok(Self { bpf })
+        // Attach per-CPU perf events to BPF maps for in-kernel PMC reading
+        let (pid_pmc_active, perf_fds) = match attach_perf_to_bpf_maps(&mut bpf) {
+            Ok(fds) => {
+                info!("eBPF: per-PID PMC tracking active ({} CPUs)", fds.len() / 3);
+                (true, fds)
+            }
+            Err(e) => {
+                warn!("eBPF: per-PID PMC unavailable ({}), using per-core proportional fallback", e);
+                (false, Vec::new())
+            }
+        };
+
+        Ok(Self { bpf, pid_pmc_active, perf_fds })
+    }
+
+    /// Whether per-PID hardware counter tracking is active.
+    pub fn has_pid_counters(&self) -> bool {
+        self.pid_pmc_active
     }
 
     /// Drain BPF maps: read all entries and delete them.
@@ -187,11 +215,34 @@ impl EbpfObserver {
             }
         }
 
+        // Drain PID_HW_COUNTERS map (per-PID per-core hardware counter deltas)
+        let mut pid_hw_counters = HashMap::new();
+        if self.pid_pmc_active {
+            if let Some(map_data) = self.bpf.map_mut("PID_HW_COUNTERS") {
+                if let Ok(mut map) = BpfHashMap::<&mut MapData, PidCpuCounterKey, PidCpuCounters>::try_from(map_data) {
+                    let mut keys_to_delete = Vec::new();
+                    for item in map.iter() {
+                        if let Ok((key, value)) = item {
+                            pid_hw_counters.insert(
+                                (key.cpu, key.pid),
+                                (value.instructions, value.cycles, value.cache_misses),
+                            );
+                            keys_to_delete.push(key);
+                        }
+                    }
+                    for key in &keys_to_delete {
+                        let _ = map.remove(key);
+                    }
+                }
+            }
+        }
+
         Ok(EbpfSnapshot {
             pid_cpu_times,
             cpu_freq_times,
             pid_cgroups,
             pid_net_bytes,
+            pid_hw_counters,
         })
     }
 
@@ -220,4 +271,176 @@ impl EbpfObserver {
 
         Ok(count)
     }
+}
+
+impl Drop for EbpfObserver {
+    fn drop(&mut self) {
+        for &fd in &self.perf_fds {
+            unsafe { libc::close(fd); }
+        }
+    }
+}
+
+// ─── Per-PID PMC: attach perf_event FDs to BPF PerfEventArray maps ──
+
+/// perf_event_attr constants
+const PERF_TYPE_HARDWARE: u32 = 0;
+const PERF_COUNT_HW_INSTRUCTIONS: u64 = 0;
+const PERF_COUNT_HW_CPU_CYCLES: u64 = 1;
+const PERF_COUNT_HW_CACHE_MISSES: u64 = 3;
+
+#[repr(C)]
+struct PerfEventAttr {
+    type_: u32,
+    size: u32,
+    config: u64,
+    _rest: [u8; 104],
+}
+
+impl PerfEventAttr {
+    fn new() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+/// Open a perf_event on a specific CPU, measuring all processes.
+fn perf_event_open(cpu: i32, config: u64) -> Result<RawFd, String> {
+    let mut attr = PerfEventAttr::new();
+    attr.type_ = PERF_TYPE_HARDWARE;
+    attr.size = std::mem::size_of::<PerfEventAttr>() as u32;
+    attr.config = config;
+
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_perf_event_open,
+            &attr as *const PerfEventAttr,
+            -1i32,  // all processes on this CPU
+            cpu,
+            -1i32,  // no group
+            0u32,
+        )
+    };
+
+    if fd < 0 {
+        return Err(format!("perf_event_open(cpu={}, config={}): {}",
+            cpu, config, std::io::Error::last_os_error()));
+    }
+    Ok(fd as RawFd)
+}
+
+fn num_online_cpus() -> Result<usize, String> {
+    let path = if std::path::Path::new("/host/sys/devices/system/cpu/online").exists() {
+        "/host/sys/devices/system/cpu/online"
+    } else {
+        "/sys/devices/system/cpu/online"
+    };
+    let cpus = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {}", path, e))?;
+    let mut count = 0;
+    for range in cpus.trim().split(',') {
+        let parts: Vec<&str> = range.split('-').collect();
+        match parts.len() {
+            1 => count += 1,
+            2 => {
+                let start: usize = parts[0].parse().map_err(|_| "bad cpu range")?;
+                let end: usize = parts[1].parse().map_err(|_| "bad cpu range")?;
+                count += end - start + 1;
+            }
+            _ => return Err("bad cpu format".into()),
+        }
+    }
+    Ok(count)
+}
+
+/// BPF syscall constants for raw map operations
+const BPF_MAP_UPDATE_ELEM: u32 = 2;
+const BPF_ANY: u64 = 0;
+
+/// Raw BPF map update via syscall. Used to set perf_event FDs in
+/// PerfEventArray maps (aya doesn't expose this for the HW counter
+/// reading use case) and to set the PMC_ENABLED flag.
+fn bpf_map_update_raw(map_fd: RawFd, key_ptr: u64, value_ptr: u64) -> Result<(), String> {
+    #[repr(C)]
+    struct BpfAttrMapElem {
+        map_fd: u32,
+        key: u64,
+        value_or_next: u64,
+        flags: u64,
+    }
+
+    let attr = BpfAttrMapElem {
+        map_fd: map_fd as u32,
+        key: key_ptr,
+        value_or_next: value_ptr,
+        flags: BPF_ANY,
+    };
+
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_MAP_UPDATE_ELEM,
+            &attr as *const BpfAttrMapElem,
+            std::mem::size_of::<BpfAttrMapElem>(),
+        )
+    };
+
+    if ret < 0 {
+        Err(format!("bpf map update: {}", std::io::Error::last_os_error()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Attach perf_event FDs to the BPF PerfEventArray maps and enable
+/// per-PID PMC tracking by setting PMC_ENABLED flag.
+///
+/// For each CPU, opens perf_event for instructions, cycles, and cache_misses,
+/// then attaches the FDs to the corresponding BPF map indices. The eBPF
+/// sched_switch handler reads these counters at context-switch time.
+fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
+    let num_cpus = num_online_cpus()?;
+    let mut fds = Vec::new();
+
+    // Map names and their perf_event configs
+    let maps = [
+        ("PERF_INSTRUCTIONS", PERF_COUNT_HW_INSTRUCTIONS),
+        ("PERF_CYCLES", PERF_COUNT_HW_CPU_CYCLES),
+        ("PERF_CACHE_MISSES", PERF_COUNT_HW_CACHE_MISSES),
+    ];
+
+    for &(map_name, config) in &maps {
+        let map_data = bpf.map_mut(map_name)
+            .ok_or_else(|| format!("{} map not found", map_name))?;
+        let map_fd = map_data.fd().as_fd().as_raw_fd();
+
+        for cpu in 0..num_cpus {
+            let perf_fd = perf_event_open(cpu as i32, config)
+                .map_err(|e| {
+                    for &f in &fds { unsafe { libc::close(f); } }
+                    e
+                })?;
+
+            let cpu_key = cpu as u32;
+            bpf_map_update_raw(map_fd, &cpu_key as *const _ as u64, &perf_fd as *const _ as u64)
+                .map_err(|e| {
+                    unsafe { libc::close(perf_fd); }
+                    for &f in &fds { unsafe { libc::close(f); } }
+                    format!("{} set cpu {}: {}", map_name, cpu, e)
+                })?;
+
+            fds.push(perf_fd);
+        }
+    }
+
+    // Enable PMC reading in the eBPF program by setting PMC_ENABLED[0] = 1
+    if let Some(map_data) = bpf.map_mut("PMC_ENABLED") {
+        let map_fd = map_data.fd().as_fd().as_raw_fd();
+        let key: u32 = 0;
+        let value: u32 = 1;
+        // PMC_ENABLED is a PerCpuArray<u32>, but we just need to write a
+        // single u32 value. Use raw bpf syscall.
+        let _ = bpf_map_update_raw(map_fd, &key as *const _ as u64, &value as *const _ as u64);
+    }
+
+    Ok(fds)
 }

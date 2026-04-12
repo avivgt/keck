@@ -10,6 +10,7 @@
 //! 5. Map processes to pods via /proc cgroup → pod UID → K8s metadata
 //! 6. POST report to keck-controller
 
+mod attribution;
 mod ebpf;
 mod hardware;
 mod perf_counters;
@@ -84,6 +85,12 @@ struct PodPowerReport {
     timestamp: SystemTime,
 }
 
+impl PodPowerReport {
+    fn recalculate_total(&mut self) {
+        self.total_uw = self.cpu_uw + self.memory_uw + self.gpu_uw + self.storage_uw + self.io_uw;
+    }
+}
+
 // ─── K8s API types (partial) ─────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -153,16 +160,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Open per-core hardware counters (instructions, cycles, LLC misses)
-    let mut hw_counter_reader = match perf_counters::HwCounterReader::new() {
-        Ok(reader) => {
-            info!("Hardware counters enabled (instructions, cycles, LLC misses) — per-core power model active");
-            Some(reader)
+    // Open per-core hardware counters (instructions, cycles, LLC misses).
+    // Skip if eBPF per-PID PMC is active (avoids double perf FDs).
+    let has_pid_pmc = ebpf_observer.as_ref().map(|o| o.has_pid_counters()).unwrap_or(false);
+    let mut hw_counter_reader = if has_pid_pmc {
+        info!("Per-PID PMC active via eBPF — skipping standalone per-core hardware counters");
+        None
+    } else {
+        match perf_counters::HwCounterReader::new() {
+            Ok(reader) => {
+                info!("Hardware counters enabled (instructions, cycles, LLC misses) — per-core power model active");
+                Some(reader)
+            }
+            Err(e) => {
+                info!("Hardware counters unavailable ({}), using CPU time ratio fallback", e);
+                None
+            }
         }
-        Err(e) => {
-            info!("Hardware counters unavailable ({}), using CPU time ratio fallback", e);
-            None
-        }
+    };
+
+    // Initialize online auto-tuner for α/β coefficients (opt-in)
+    let mut coefficient_tuner = if std::env::var("KECK_AUTO_TUNE").ok().as_deref() == Some("true") {
+        let init_alpha = std::env::var("KECK_ALPHA")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(0.3);
+        let init_beta = std::env::var("KECK_BETA")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(1.5);
+        info!("Online auto-tuning enabled (initial alpha={}, beta={})", init_alpha, init_beta);
+        Some(attribution::tuner::CoefficientTuner::new(init_alpha, init_beta))
+    } else {
+        None
     };
 
     // Build K8s API client using in-cluster service account
@@ -412,6 +438,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Drain eBPF maps
         let ebpf_snapshot = ebpf_observer.as_mut().and_then(|obs| obs.drain().ok());
 
+        // Feed data to online auto-tuner (if enabled)
+        if let Some(ref mut tuner) = coefficient_tuner {
+            if let Some(ref snapshot) = ebpf_snapshot {
+                tuner.update(&snapshot.pid_hw_counters, &snapshot.pid_cpu_times);
+            }
+        }
+
         // When CPU source is RAPL (estimated), use eBPF per-core data for
         // frequency-weighted attribution. When CPU source is Redfish (measured),
         // eBPF per-core data doesn't add value — use /proc CPU time ratios.
@@ -432,22 +465,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if cpu_type == "estimated" {
             if let Some(ref snapshot) = ebpf_snapshot {
                 if !snapshot.pid_cpu_times.is_empty() {
+                    // Resolve α/β: tuner (if enabled) > env var > default
+                    let (ab_alpha, ab_beta) = coefficient_tuner.as_ref()
+                        .map(|t| t.current())
+                        .unwrap_or_else(|| {
+                            let a = std::env::var("KECK_ALPHA").ok().and_then(|s| s.parse().ok()).unwrap_or(0.3);
+                            let b = std::env::var("KECK_BETA").ok().and_then(|s| s.parse().ok()).unwrap_or(1.5);
+                            (a, b)
+                        });
+
                     // Compute frequency-weighted CPU attribution from eBPF
                     let ebpf_pods = enumerate_pods_ebpf_weighted(
                         &node_name, cpu_uw, mem_uw, total_llc_misses,
                         &core_counters, &pod_cache, snapshot,
+                        ab_alpha, ab_beta,
                     );
 
-                    // Override CPU power for pods that eBPF saw (active pods)
+                    // Override CPU and memory power for pods that eBPF saw.
+                    // The eBPF path uses PSS + LLC miss ratio for memory (more
+                    // accurate than the /proc path's PSS + page fault model).
                     if !ebpf_pods.is_empty() {
-                        let ebpf_map: HashMap<String, u64> = ebpf_pods.iter()
-                            .map(|p| (p.pod_uid.clone(), p.cpu_uw))
+                        let ebpf_map: HashMap<String, (u64, u64)> = ebpf_pods.iter()
+                            .map(|p| (p.pod_uid.clone(), (p.cpu_uw, p.memory_uw)))
                             .collect();
 
                         for pod in &mut pods {
-                            if let Some(&ebpf_cpu) = ebpf_map.get(&pod.pod_uid) {
+                            if let Some(&(ebpf_cpu, ebpf_mem)) = ebpf_map.get(&pod.pod_uid) {
                                 pod.cpu_uw = ebpf_cpu;
-                                pod.total_uw = pod.cpu_uw + pod.memory_uw + pod.gpu_uw;
+                                pod.memory_uw = ebpf_mem;
+                                pod.recalculate_total();
                             }
                         }
                     }
@@ -754,6 +800,8 @@ fn enumerate_pods_ebpf_weighted(
     core_counters: &[perf_counters::CoreCounterDeltas],
     pod_cache: &HashMap<String, PodInfo>,
     snapshot: &ebpf::EbpfSnapshot,
+    alpha: f64,
+    beta: f64,
 ) -> Vec<PodPowerReport> {
     // Step 1: Compute per-core power weight.
     // Priority: hardware cycles (best) > frequency² × time > equal time
@@ -819,18 +867,48 @@ fn enumerate_pods_ebpf_weighted(
     }
 
     // Step 4: Attribute per-core energy to PIDs
+    //
+    // When per-PID hardware counters are available (from eBPF sched_switch
+    // PMC reading), use the full model:
+    //   weight = time × (1 + α·IPC + β·cache_miss_ratio)
+    // This differentiates compute-heavy vs memory-heavy processes on the
+    // same core. Without per-PID counters, falls back to time-only ratio.
+    let has_pid_counters = !snapshot.pid_hw_counters.is_empty();
+
     let mut pod_cpu_uw: HashMap<String, f64> = HashMap::new();
 
     for (&cpu, pids) in &core_pid_time {
         let ce = core_energy.get(&cpu).copied().unwrap_or(0.0);
         if ce <= 0.0 { continue; }
 
-        let total_time: u64 = pids.iter().map(|&(_, t)| t).sum();
-        if total_time == 0 { continue; }
-
+        // Compute per-PID weights on this core
+        let mut pid_weights: Vec<(u32, f64)> = Vec::with_capacity(pids.len());
         for &(pid, time_ns) in pids {
+            let weight = if has_pid_counters {
+                let (instr, cyc, misses) = snapshot.pid_hw_counters
+                    .get(&(cpu, pid)).copied().unwrap_or((0, 0, 0));
+                let ipc = if cyc > 0 { instr as f64 / cyc as f64 } else { 0.0 };
+                // Use cache_misses / instructions as a dimensionless ratio
+                // (avoids the scaling problem of misses-per-1000-instructions)
+                let miss_ratio = if instr > 0 {
+                    misses as f64 / instr as f64
+                } else {
+                    0.0
+                };
+                let workload_factor = 1.0 + alpha * ipc + beta * miss_ratio;
+                time_ns as f64 * workload_factor
+            } else {
+                time_ns as f64
+            };
+            pid_weights.push((pid, weight));
+        }
+
+        let total_weight: f64 = pid_weights.iter().map(|&(_, w)| w).sum();
+        if total_weight <= 0.0 { continue; }
+
+        for (pid, weight) in pid_weights {
             if let Some(pod_uid) = pid_pod.get(&pid) {
-                let ratio = time_ns as f64 / total_time as f64;
+                let ratio = weight / total_weight;
                 *pod_cpu_uw.entry(pod_uid.clone()).or_default() += ce * ratio;
             }
         }
@@ -1367,7 +1445,7 @@ async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, 
         // Find matching pod and add GPU power
         if let Some(pod) = pods.iter_mut().find(|p| p.pod_name == pod_name && p.namespace == namespace) {
             pod.gpu_uw += gpu_uw;
-            pod.total_uw = pod.cpu_uw + pod.memory_uw + pod.gpu_uw;
+            pod.recalculate_total();
         } else {
             // Pod not in cgroup scan — look up real UID from K8s API cache
             let real_uid = pod_cache.iter()

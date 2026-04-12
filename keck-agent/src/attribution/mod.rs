@@ -14,6 +14,7 @@
 
 pub mod engine;
 pub mod model;
+pub mod tuner;
 mod types;
 
 pub use engine::AttributionEngine;

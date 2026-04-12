@@ -46,6 +46,10 @@ pub struct CpuSchedState {
     pub current_pid: u32,
     /// Timestamp (ktime_ns) when this task started running
     pub start_time_ns: u64,
+    /// PMC values when the current task started running (for per-PID deltas)
+    pub start_instructions: u64,
+    pub start_cycles: u64,
+    pub start_cache_misses: u64,
 }
 
 #[cfg(feature = "userspace")]
@@ -113,6 +117,38 @@ pub struct CoreCounters {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for CoreCounters {}
 
+// ─── Per-PID per-core hardware counters (from eBPF sched_switch) ──
+
+/// Key for the per-PID per-core hardware counter BPF hash map.
+/// Tracks instructions, cycles, and cache misses per PID per core.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PidCpuCounterKey {
+    /// CPU core index
+    pub cpu: u32,
+    /// Process ID
+    pub pid: u32,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for PidCpuCounterKey {}
+
+/// Per-PID per-core hardware counter accumulator.
+/// Accumulated between sched_switch context switches, drained each interval.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PidCpuCounters {
+    /// Instructions retired by this PID on this core
+    pub instructions: u64,
+    /// CPU cycles consumed by this PID on this core
+    pub cycles: u64,
+    /// Last-level cache misses caused by this PID on this core
+    pub cache_misses: u64,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for PidCpuCounters {}
+
 // ─── cgroup tracking: pid → cgroup_id ────────────────────────────
 
 /// Value for the pid_cgroup BPF hash map.
@@ -164,6 +200,9 @@ pub const MAX_PID_CGROUP_ENTRIES: u32 = 65536;
 /// Maximum entries in pid_net_bytes map.
 pub const MAX_PID_NET_ENTRIES: u32 = 65536;
 
+/// Maximum entries in per-PID per-core hardware counter map.
+pub const MAX_PID_HW_COUNTER_ENTRIES: u32 = 65536;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,8 +221,8 @@ mod tests {
 
     #[test]
     fn test_cpu_sched_state_size() {
-        // u32 (4) + padding (4) + u64 (8) = 16 bytes (repr(C))
-        assert_eq!(mem::size_of::<CpuSchedState>(), 16);
+        // u32 (4) + padding (4) + u64 (8) × 4 = 40 bytes (repr(C))
+        assert_eq!(mem::size_of::<CpuSchedState>(), 40);
     }
 
     #[test]
@@ -214,11 +253,23 @@ mod tests {
     }
 
     #[test]
+    fn test_pid_cpu_counter_key_size() {
+        assert_eq!(mem::size_of::<PidCpuCounterKey>(), 8);
+    }
+
+    #[test]
+    fn test_pid_cpu_counters_size() {
+        // 3 x u64 = 24 bytes
+        assert_eq!(mem::size_of::<PidCpuCounters>(), 24);
+    }
+
+    #[test]
     fn test_constants() {
         assert_eq!(MAX_PID_CPU_ENTRIES, 65536);
         assert_eq!(MAX_CPUS, 1024);
         assert_eq!(MAX_CPU_FREQ_ENTRIES, 32768);
         assert_eq!(MAX_PID_CGROUP_ENTRIES, 65536);
+        assert_eq!(MAX_PID_HW_COUNTER_ENTRIES, 65536);
     }
 
     #[test]
