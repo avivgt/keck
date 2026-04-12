@@ -361,37 +361,55 @@ fn num_online_cpus() -> Result<usize, String> {
     Ok(count)
 }
 
-/// Extract the raw file descriptor from an aya Map.
+/// Extract the raw file descriptor from an aya Map by pinning to bpffs.
 ///
-/// Map in aya 0.13 doesn't implement AsFd, so we get the FD via MapInfo.
+/// Map in aya 0.13 doesn't expose FD directly (no AsFd, no info()).
+/// We pin the map to /sys/fs/bpf, open the pinned path to get an FD,
+/// then unpin. The original map FD in aya remains valid.
 fn get_map_fd(map: &mut aya::maps::Map) -> Option<RawFd> {
-    // Map::info() returns MapInfo which contains the id. But we need the FD.
-    // The map FD is the underlying file descriptor that aya holds.
-    // In aya 0.13, we can get it by converting to a concrete map type.
-    // PerfEventArray and PerCpuArray both wrap MapData which has fd().
-    // Use the map's id to look it up via BPF_MAP_GET_FD_BY_ID.
-    let info = map.info().ok()?;
-    let id = info.id();
-    bpf_map_get_fd_by_id(id)
+    use std::ffi::CString;
+
+    let pin_path = format!("/sys/fs/bpf/keck_tmp_{}", std::process::id());
+    if map.pin(&pin_path).is_err() {
+        return None;
+    }
+
+    // Open the pinned map to get an FD via BPF_OBJ_GET
+    let fd = bpf_obj_get(&pin_path);
+
+    // Unpin immediately — our new FD stays valid
+    let _ = std::fs::remove_file(&pin_path);
+
+    fd
 }
 
-fn bpf_map_get_fd_by_id(id: u32) -> Option<RawFd> {
+fn bpf_obj_get(path: &str) -> Option<RawFd> {
+    use std::ffi::CString;
+
     #[repr(C)]
-    struct BpfAttrGetId {
-        id: u32,
-        next_id: u32,
-        open_flags: u32,
+    struct BpfAttrObjGet {
+        pathname: u64,
+        bpf_fd: u32,
+        file_flags: u32,
     }
-    let attr = BpfAttrGetId { id, next_id: 0, open_flags: 0 };
-    const BPF_MAP_GET_FD_BY_ID: u32 = 14;
+
+    let c_path = CString::new(path).ok()?;
+    let attr = BpfAttrObjGet {
+        pathname: c_path.as_ptr() as u64,
+        bpf_fd: 0,
+        file_flags: 0,
+    };
+
+    const BPF_OBJ_GET: u32 = 7;
     let fd = unsafe {
         libc::syscall(
             libc::SYS_bpf,
-            BPF_MAP_GET_FD_BY_ID,
-            &attr as *const BpfAttrGetId,
-            std::mem::size_of::<BpfAttrGetId>(),
+            BPF_OBJ_GET,
+            &attr as *const BpfAttrObjGet,
+            std::mem::size_of::<BpfAttrObjGet>(),
         )
     };
+
     if fd < 0 { None } else { Some(fd as RawFd) }
 }
 
@@ -474,14 +492,18 @@ fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
 
             fds.push(perf_fd);
         }
+        unsafe { libc::close(map_fd); } // close the extra FD from bpf_obj_get
     }
 
     // Enable PMC reading in the eBPF program by setting PMC_ENABLED[0] = 1
     if let Some(map_data) = bpf.map_mut("PMC_ENABLED") {
         if let Some(map_fd) = get_map_fd(map_data) {
             let key: u32 = 0;
+            // PerCpuArray needs per-CPU values, but we just set a single u32.
+            // The eBPF program reads index 0 which returns this CPU's value.
             let value: u32 = 1;
             let _ = bpf_map_update_raw(map_fd, &key as *const _ as u64, &value as *const _ as u64);
+            unsafe { libc::close(map_fd); } // close the extra FD from bpf_obj_get
         }
     }
 
