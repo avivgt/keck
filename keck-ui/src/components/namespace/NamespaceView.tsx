@@ -147,69 +147,74 @@ const NamespaceView: React.FC = () => {
           <div style={{ fontSize: "0.9em", lineHeight: 1.7 }}>
             <p><strong>1. Hardware power measurement</strong></p>
             <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-              The agent probes each node's BMC via the Redfish API to discover per-subsystem
-              power sensors (CPU, Memory, I/O, Platform, individual PSUs).
-              Whatever Redfish doesn't cover falls back to Intel RAPL energy counters.
-              Measured sources (Redfish VR sensors, DCGM GPU) are always preferred over
-              estimated (RAPL).
+              Each node's agent reads real power data from the server's management controller (BMC) via Redfish.
             </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>Redfish</strong> — industry-standard BMC API that exposes per-subsystem power sensors (CPU, Memory, Storage, Fans, PSU).</li>
+              <li><strong>RAPL</strong> (Running Average Power Limit) — Intel CPU-internal energy counters. Used as fallback when Redfish sensors are unavailable.</li>
+              <li><strong>MetricReports</strong> — BMC telemetry feature that provides periodic power readings for storage and PCIe subsystems.</li>
+              <li><strong>Measured {">"} Estimated</strong> — Redfish hardware sensors are always preferred over RAPL software estimates.</li>
+            </ul>
 
-            <p style={{ marginTop: 12 }}><strong>2. Per-core CPU attribution (eBPF + hardware counters)</strong></p>
+            <p style={{ marginTop: 12 }}><strong>2. CPU power attribution</strong></p>
             <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-              eBPF programs attached to kernel tracepoints (<code>sched_switch</code>,{" "}
-              <code>cpu_frequency</code>) track per-PID per-core CPU time with nanosecond
-              precision and per-core frequency transitions. Hardware performance counters
-              (<code>perf_event_open</code>) measure instructions retired, CPU cycles, and
-              LLC cache misses per core.
-              <br /><br />
-              The agent selects the best attribution model based on available data:
-              <br />• <strong>Full model</strong>: weight = time × freq² × (1 + α·IPC + β·cache_miss_rate).
-              Captures compute intensity (IPC) and memory-boundedness (cache misses).
-              <br />• <strong>Frequency-weighted</strong>: weight = time × freq² (no counter data available).
-              A process at 3.5 GHz is charged ~3× more than one at 1.2 GHz for the same duration.
-              <br />• <strong>CPU time ratio</strong>: weight = time only (simplest fallback).
-              <br /><br />
-              All models guarantee energy conservation: Σ(process energy on core) = core energy.
+              The agent determines how much of the node's total CPU power each pod is responsible for.
             </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>sched_switch</strong> — a kernel tracepoint that fires every time one process replaces another on a CPU core. The agent uses eBPF to measure exactly how long each process runs on each core.</li>
+              <li><strong>cpu_frequency</strong> — a kernel tracepoint that fires when a core changes clock speed. Tracks time spent at each frequency.</li>
+              <li><strong>IPC</strong> (Instructions Per Cycle) — how many instructions a process completes per CPU cycle. Higher IPC means the process is doing more compute work and using more power.</li>
+              <li><strong>LLC misses</strong> (Last-Level Cache misses) — when data isn't in the CPU cache, it must be fetched from RAM. More misses mean the process is memory-heavy.</li>
+              <li><strong>alpha (α = 0.3)</strong> — weight given to IPC in the power model. A process with higher IPC gets charged proportionally more CPU power.</li>
+              <li><strong>beta (β = 1.5)</strong> — weight given to cache miss ratio in the power model. A process causing more cache misses gets charged more power. Both α and β are auto-tunable.</li>
+              <li><strong>freq²</strong> — CPU power scales with the square of frequency (from the physics: P = C × V² × f). A process running at 3.5 GHz uses ~3× more power than one at 1.2 GHz.</li>
+              <li><strong>Energy conservation</strong> — the sum of all process power on a core always equals the core's measured power. No energy is created or lost.</li>
+            </ul>
 
-            <p style={{ marginTop: 12 }}><strong>3. Memory attribution (PSS + LLC misses)</strong></p>
+            <p style={{ marginTop: 12 }}><strong>3. Memory power attribution</strong></p>
             <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-              DRAM power has two components:
-              <br />• <strong>Static (60%)</strong>: PSS (Proportional Set Size) from{" "}
-              <code>/proc/[pid]/smaps_rollup</code> — captures DRAM refresh power proportional
-              to memory held. PSS splits shared pages among users, preventing double-counting.
-              <br />• <strong>Dynamic (40%)</strong>: LLC miss counters — every LLC miss triggers a
-              DRAM access. Pods streaming data (ML inference, in-memory DBs) are charged more
-              than idle pods holding equivalent memory.
-              <br /><br />
-              Formula: pod memory power = node memory power × (0.6 × pod_PSS/total_PSS + 0.4 × pod_LLC/total_LLC).
-              Falls back to 100% PSS when LLC counters are unavailable.
+              The agent splits the node's total DRAM power across pods based on how much memory they hold and how actively they use it.
             </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>PSS</strong> (Proportional Set Size) — the amount of physical memory a process uses, with shared pages split fairly among all users. Read from <code>/proc/[pid]/smaps_rollup</code>. Accounts for 60% of memory power (DRAM refresh cost).</li>
+              <li><strong>LLC misses</strong> — each cache miss triggers a DRAM read or write. Processes that stream large data sets cause more DRAM activity. Accounts for 40% of memory power.</li>
+              <li><strong>Formula</strong>: pod memory power = node memory power × (0.6 × pod_PSS/total_PSS + 0.4 × pod_LLC/total_LLC).</li>
+            </ul>
 
-            <p style={{ marginTop: 12 }}><strong>4. Network I/O attribution (TCP kprobes)</strong></p>
+            <p style={{ marginTop: 12 }}><strong>4. Storage power attribution</strong></p>
             <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-              eBPF kprobes on <code>tcp_sendmsg</code> and <code>tcp_recvmsg</code> track
-              per-PID TCP bytes sent and received. This data is used to attribute network-related
-              power (NIC, switching fabric) to individual pods proportional to their traffic.
-              Kprobes are optional — if unavailable, the agent falls back to CPU-ratio-based
-              network attribution.
+              Storage power (SSDs, HDDs) is read from the BMC via Redfish MetricReports and distributed to pods based on disk I/O activity.
             </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>/proc/[pid]/io</strong> — kernel file that tracks actual disk bytes read and written per process (not page cache).</li>
+              <li>Pods with no active disk I/O during the interval receive 0W storage power. This is correct — idle storage power is a node-level cost, not attributable to any pod.</li>
+            </ul>
 
-            <p style={{ marginTop: 12 }}><strong>5. GPU attribution (DCGM)</strong></p>
+            <p style={{ marginTop: 12 }}><strong>5. Network power attribution</strong></p>
             <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-              GPU power is read from the NVIDIA DCGM exporter, providing per-pod, per-GPU
-              measured power directly from the hardware. The agent auto-discovers the
-              DCGM exporter pod on its node via the Kubernetes API.
+              Network interface power is distributed to pods based on their TCP traffic volume.
             </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>tcp_sendmsg / tcp_recvmsg</strong> — kernel functions called when a process sends or receives TCP data. The agent attaches eBPF probes to track bytes per process.</li>
+              <li><strong>kretprobe</strong> — for <code>tcp_recvmsg</code>, the agent reads the function's return value (actual bytes received) rather than the buffer size, for accuracy.</li>
+              <li>Falls back to CPU-ratio-based attribution when TCP kprobes are unavailable.</li>
+            </ul>
 
-            <p style={{ marginTop: 12 }}><strong>6. Pod → Namespace aggregation</strong></p>
+            <p style={{ marginTop: 12 }}><strong>6. GPU power (DCGM)</strong></p>
             <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
-              Processes are mapped to pods via cgroup v2 paths and eBPF cgroup tracking.
-              Pod UIDs are resolved to names and namespaces via the Kubernetes API (cached, refreshed every 30s).
-              Namespace power = sum of all pod power within the namespace.
-              Non-pod processes (kernel threads, systemd) are not attributed to any pod,
-              so the sum of pod power is always less than total node power.
+              GPU power is measured directly from hardware — no estimation needed.
             </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>DCGM</strong> (Data Center GPU Manager) — NVIDIA's monitoring tool that reports per-GPU power consumption. The agent reads DCGM metrics which include pod name and namespace.</li>
+            </ul>
+
+            <p style={{ marginTop: 12 }}><strong>7. Pod → Namespace aggregation</strong></p>
+            <p style={{ marginLeft: 16, color: "var(--pf-v6-global--Color--200)" }}>
+              Namespace power = sum of all pod power in that namespace. Non-pod processes (kernel, systemd) are not attributed to any pod, so the sum of all pods is always less than total node power.
+            </p>
+            <ul style={{ marginLeft: 32, color: "var(--pf-v6-global--Color--200)" }}>
+              <li><strong>cgroup v2</strong> — Linux kernel feature that groups processes into containers. The agent reads <code>/proc/[pid]/cgroup</code> to find which pod each process belongs to.</li>
+            </ul>
           </div>
         </ExpandableSection>
       </PageSection>
