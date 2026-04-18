@@ -86,7 +86,7 @@ const NodesView: React.FC = () => {
                   <Th sort={getSortParams("idle_watts")}>Idle / Other</Th>
                   <Th sort={getSortParams("error_ratio")}>Error</Th>
                   <Th sort={getSortParams("pod_count")}>Pods</Th>
-                  <Th>CPU Source</Th>
+                  <Th>CPU Method</Th>
                 </Tr>
               </Thead>
               <Tbody>
@@ -116,6 +116,11 @@ const NodesView: React.FC = () => {
                       >
                         {node.cpu_reading_type || "unknown"}
                       </Label>
+                      {node.cpu_source && (
+                        <span style={{ marginLeft: 6, fontSize: "0.8em", color: "var(--pf-v6-global--Color--200)" }}>
+                          {node.cpu_source.replace(/\s*\(https?:\/\/[^)]+\)/, "")}
+                        </span>
+                      )}
                     </Td>
                   </Tr>
                 ))}

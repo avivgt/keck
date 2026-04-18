@@ -20,9 +20,9 @@
   {
     "type": "console.navigation/href",
     "properties": {
-      "id": "power-namespaces",
-      "name": "Namespaces",
-      "href": "/power-management/namespaces",
+      "id": "power-nodes",
+      "name": "Nodes",
+      "href": "/power-management/nodes",
       "section": "power-management",
       "perspective": "admin"
     }
@@ -30,9 +30,9 @@
   {
     "type": "console.navigation/href",
     "properties": {
-      "id": "power-nodes",
-      "name": "Nodes",
-      "href": "/power-management/nodes",
+      "id": "power-namespaces",
+      "name": "Namespaces",
+      "href": "/power-management/namespaces",
       "section": "power-management",
       "perspective": "admin"
     }

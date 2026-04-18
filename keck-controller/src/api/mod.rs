@@ -359,6 +359,8 @@ async fn handle_nodes(
                 "pod_count": n.pod_count,
                 "headroom_watts": n.headroom_uw.map(|v| v as f64 / 1e6),
                 "last_seen_secs_ago": n.last_seen_secs_ago,
+                "cpu_source": n.cpu_source,
+                "cpu_reading_type": n.cpu_reading_type,
             })
         })
         .collect();
