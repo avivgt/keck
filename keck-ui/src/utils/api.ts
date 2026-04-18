@@ -46,6 +46,8 @@ export interface NodeSummary {
   error_ratio: number;
   pod_count: number;
   headroom_watts: number | null;
+  cpu_source: string;
+  cpu_reading_type: string;
 }
 
 export interface PodPower {

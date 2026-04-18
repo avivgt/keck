@@ -90,6 +90,16 @@
   {
     "type": "console.page/route",
     "properties": {
+      "exact": true,
+      "path": "/power-management/nodes",
+      "component": {
+        "$codeRef": "NodesView"
+      }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
       "exact": false,
       "path": "/power-management/pods/:uid",
       "component": {
