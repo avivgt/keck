@@ -38,6 +38,7 @@
       "PowerManagementPage": "./src/components/PowerManagementPage",
       "ClusterOverview": "./src/components/cluster/ClusterOverview",
       "NamespaceView": "./src/components/namespace/NamespaceView",
+      "NodesView": "./src/components/node/NodesView",
       "PodView": "./src/components/pod/PodView"
     },
     "dependencies": {
