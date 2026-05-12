@@ -435,7 +435,7 @@ async fn handle_applications(
     let agg = state.aggregator.read().await;
     let group_by = params.get("group_by")
         .map(|s| crate::aggregator::GroupBy::parse(s))
-        .unwrap_or(crate::aggregator::GroupBy::Workload);
+        .unwrap_or(crate::aggregator::GroupBy::Application);
     let category = params.get("category").map(|s| s.as_str());
 
     let groups = agg.group_power(group_by, category);
