@@ -628,7 +628,7 @@ async fn refresh_pod_cache(
         let category = classify_category(&namespace, &pod_labels);
 
         let (wl_uid, wl_name, wl_kind) = resolve_owner(
-            client, &uid, &name, &owner_refs, owner_cache
+            client, &uid, &name, &namespace, &owner_refs, owner_cache
         ).await;
 
         cache.insert(uid, PodIdentity {
@@ -649,6 +649,7 @@ async fn resolve_owner(
     client: &Client,
     pod_uid: &str,
     pod_name: &str,
+    namespace: &str,
     owner_refs: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference],
     owner_cache: &mut OwnerCache,
 ) -> (String, String, String) {
@@ -667,7 +668,7 @@ async fn resolve_owner(
                 return (cached.uid.clone(), cached.name.clone(), cached.kind.clone());
             }
 
-            let resolved = resolve_intermediate_owner(client, owner_uid, owner_name, owner_kind).await;
+            let resolved = resolve_intermediate_owner(client, namespace, owner_name, owner_kind).await;
             let mapping = resolved.unwrap_or(OwnerMapping {
                 uid: owner_uid.clone(),
                 name: owner_name.clone(),
@@ -688,16 +689,14 @@ async fn resolve_owner(
 
 async fn resolve_intermediate_owner(
     client: &Client,
-    owner_uid: &str,
-    _owner_name: &str,
+    namespace: &str,
+    owner_name: &str,
     owner_kind: &str,
 ) -> Option<OwnerMapping> {
     match owner_kind {
         "ReplicaSet" => {
-            let rs_api: Api<ReplicaSet> = Api::all(client.clone());
-            let rs_list = rs_api.list(&ListParams::default()
-                .fields(&format!("metadata.uid={}", owner_uid))).await.ok()?;
-            let rs = rs_list.items.into_iter().next()?;
+            let rs_api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
+            let rs = rs_api.get(owner_name).await.ok()?;
             let rs_owners = rs.metadata.owner_references.unwrap_or_default();
             let deployment = select_controller_owner(&rs_owners)?;
             Some(OwnerMapping {
@@ -707,10 +706,8 @@ async fn resolve_intermediate_owner(
             })
         }
         "Job" => {
-            let job_api: Api<Job> = Api::all(client.clone());
-            let job_list = job_api.list(&ListParams::default()
-                .fields(&format!("metadata.uid={}", owner_uid))).await.ok()?;
-            let job = job_list.items.into_iter().next()?;
+            let job_api: Api<Job> = Api::namespaced(client.clone(), namespace);
+            let job = job_api.get(owner_name).await.ok()?;
             let job_owners = job.metadata.owner_references.unwrap_or_default();
             let cronjob = select_controller_owner(&job_owners)?;
             Some(OwnerMapping {
