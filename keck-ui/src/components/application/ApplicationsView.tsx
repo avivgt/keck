@@ -38,7 +38,7 @@ const ApplicationsView: React.FC = () => {
   const [groups, setGroups] = React.useState<GroupPower[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [category, setCategory] = React.useState<Category>("all");
-  const [groupBy, setGroupBy] = React.useState("workload");
+  const [groupBy, setGroupBy] = React.useState("application");
   const [sortBy, setSortBy] = React.useState<SortKey>("total_watts");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [groupByOpen, setGroupByOpen] = React.useState(false);
@@ -77,6 +77,7 @@ const ApplicationsView: React.FC = () => {
   });
 
   const groupByOptions = [
+    { value: "application", label: "Application" },
     { value: "workload", label: "Workload" },
     { value: "namespace", label: "Namespace" },
     { value: "label:app.kubernetes.io/name", label: "App Label" },
