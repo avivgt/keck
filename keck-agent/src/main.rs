@@ -13,6 +13,7 @@
 mod attribution;
 mod ebpf;
 mod hardware;
+mod k8s;
 mod perf_counters;
 
 use std::collections::HashMap;
@@ -20,10 +21,15 @@ use std::fs;
 use std::time::{Duration, SystemTime};
 
 use log::{info, warn};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use ebpf::EbpfObserver;
 use hardware::{Component, PowerSource, discover_sources, procfs_root};
+use k8s::workload::{PodIdentity, classify_category, capture_labels, parse_label_config, select_controller_owner, OwnerMapping};
+use kube::{Api, Client, api::ListParams};
+use k8s_openapi::api::apps::v1::ReplicaSet;
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::Pod as K8sPod;
 
 // ─── Wire types ──────────────────────────────────────────────────
 
@@ -83,37 +89,24 @@ struct PodPowerReport {
     io_uw: u64,
     total_uw: u64,
     timestamp: SystemTime,
+    #[serde(default)]
+    workload_uid: String,
+    #[serde(default)]
+    workload_name: String,
+    #[serde(default)]
+    workload_kind: String,
+    #[serde(default)]
+    workload_category: String,
+    #[serde(default)]
+    labels: HashMap<String, String>,
 }
+
+type OwnerCache = HashMap<String, OwnerMapping>;
 
 impl PodPowerReport {
     fn recalculate_total(&mut self) {
         self.total_uw = self.cpu_uw + self.memory_uw + self.gpu_uw + self.storage_uw + self.io_uw;
     }
-}
-
-// ─── K8s API types (partial) ─────────────────────────────────────
-
-#[derive(Deserialize)]
-struct PodList {
-    items: Vec<Pod>,
-}
-
-#[derive(Deserialize)]
-struct Pod {
-    metadata: PodMetadata,
-}
-
-#[derive(Deserialize)]
-struct PodMetadata {
-    name: String,
-    namespace: String,
-    uid: String,
-}
-
-/// Pod info resolved from the K8s API.
-struct PodInfo {
-    name: String,
-    namespace: String,
 }
 
 // ─── Main ────────────────────────────────────────────────────────
@@ -192,7 +185,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build K8s API client using in-cluster service account
-    let k8s_client = build_k8s_client();
+    let k8s_client = Client::try_default().await
+        .expect("Failed to create K8s client (not in-cluster?)");
+
+    let (exact_labels, prefix_labels) = {
+        let raw = std::env::var("KECK_CAPTURED_LABELS").unwrap_or_default();
+        if raw.is_empty() {
+            let exact: Vec<String> = k8s::workload::DEFAULT_CAPTURED_LABELS.iter().map(|s| s.to_string()).collect();
+            let prefixes: Vec<String> = k8s::workload::DEFAULT_CAPTURED_PREFIXES.iter().map(|s| s.to_string()).collect();
+            (exact, prefixes)
+        } else {
+            parse_label_config(&raw)
+        }
+    };
+    let mut owner_cache: OwnerCache = HashMap::new();
 
     // HTTP client for reporting to controller
     let http_client = reqwest::Client::builder()
@@ -215,8 +221,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_io_bytes: HashMap<u32, u64> = HashMap::new(); // pid → cumulative I/O bytes
     let mut tick_count: u64 = 0;
 
-    // Pod metadata cache: uid → (name, namespace)
-    let mut pod_cache: HashMap<String, PodInfo> = HashMap::new();
+    // Pod metadata cache: uid → PodIdentity
+    let mut pod_cache: HashMap<String, PodIdentity> = HashMap::new();
     let mut last_pod_refresh = std::time::Instant::now();
     let pod_refresh_interval = Duration::from_secs(30);
 
@@ -230,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Initial pod cache
-    refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache).await;
+    refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache, &mut owner_cache, &exact_labels, &prefix_labels).await;
     info!("Cached {} pods from K8s API", pod_cache.len());
 
     info!("Initial hardware read complete, entering collection loop");
@@ -240,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Refresh pod cache periodically
         if last_pod_refresh.elapsed() >= pod_refresh_interval {
-            refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache).await;
+            refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache, &mut owner_cache, &exact_labels, &prefix_labels).await;
             last_pod_refresh = std::time::Instant::now();
         }
 
@@ -586,93 +592,135 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── K8s API ─────────────────────────────────────────────────────
 
-/// Build an HTTP client for in-cluster K8s API access.
-fn build_k8s_client() -> reqwest::Client {
-    // Read the service account CA cert
-    let ca_cert = fs::read("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-        .ok()
-        .and_then(|pem| reqwest::Certificate::from_pem(&pem).ok());
-
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10));
-
-    if let Some(cert) = ca_cert {
-        builder = builder.add_root_certificate(cert);
-    } else {
-        // Fallback: skip TLS verification (dev/test only)
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
-}
-
-/// Get the service account token for K8s API auth.
-fn k8s_token() -> Option<String> {
-    fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token").ok()
-}
-
-/// Refresh the pod metadata cache from the K8s API.
 async fn refresh_pod_cache(
-    client: &reqwest::Client,
+    client: &Client,
     node_name: &str,
-    cache: &mut HashMap<String, PodInfo>,
+    cache: &mut HashMap<String, PodIdentity>,
+    owner_cache: &mut OwnerCache,
+    exact_labels: &[String],
+    prefix_labels: &[String],
 ) {
-    let token = match k8s_token() {
-        Some(t) => t,
-        None => {
-            log::debug!("No K8s service account token found");
-            return;
-        }
-    };
+    let pods: Api<K8sPod> = Api::all(client.clone());
+    let lp = ListParams::default()
+        .fields(&format!("spec.nodeName={}", node_name));
 
-    let url = format!(
-        "https://kubernetes.default.svc/api/v1/pods?fieldSelector=spec.nodeName={}",
-        node_name,
-    );
-
-    let resp = match client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Failed to query K8s API for pods: {}", e);
-            return;
-        }
-    };
-
-    if !resp.status().is_success() {
-        warn!("K8s API returned {}", resp.status());
-        return;
-    }
-
-    let pod_list: PodList = match resp.json().await {
+    let pod_list = match pods.list(&lp).await {
         Ok(pl) => pl,
         Err(e) => {
-            warn!("Failed to parse K8s pod list: {}", e);
+            warn!("Failed to list pods: {}", e);
             return;
         }
     };
 
     cache.clear();
-    for pod in pod_list.items {
-        cache.insert(
-            pod.metadata.uid.clone(),
-            PodInfo {
-                name: pod.metadata.name,
-                namespace: pod.metadata.namespace,
-            },
-        );
+    for pod in pod_list {
+        let meta = &pod.metadata;
+        let uid = match &meta.uid {
+            Some(u) => u.clone(),
+            None => continue,
+        };
+        let name = meta.name.clone().unwrap_or_default();
+        let namespace = meta.namespace.clone().unwrap_or_default();
+        let pod_labels = meta.labels.clone().unwrap_or_default();
+        let owner_refs = meta.owner_references.clone().unwrap_or_default();
+
+        let captured = capture_labels(&pod_labels, exact_labels, prefix_labels);
+        let category = classify_category(&namespace, &pod_labels);
+
+        let (wl_uid, wl_name, wl_kind) = resolve_owner(
+            client, &uid, &name, &owner_refs, owner_cache
+        ).await;
+
+        cache.insert(uid, PodIdentity {
+            name,
+            namespace,
+            workload_uid: wl_uid,
+            workload_name: wl_name,
+            workload_kind: wl_kind,
+            workload_category: category,
+            labels: captured,
+        });
     }
 
     log::debug!("Refreshed pod cache: {} pods on node {}", cache.len(), node_name);
 }
 
-fn count_unique_namespaces(_node: &str, cache: &HashMap<String, PodInfo>) -> usize {
-    let ns: std::collections::HashSet<&str> = cache.values().map(|p| p.namespace.as_str()).collect();
-    ns.len()
+async fn resolve_owner(
+    client: &Client,
+    pod_uid: &str,
+    pod_name: &str,
+    owner_refs: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference],
+    owner_cache: &mut OwnerCache,
+) -> (String, String, String) {
+    let owner = match select_controller_owner(owner_refs) {
+        Some(o) => o,
+        None => return (pod_uid.to_string(), pod_name.to_string(), "Pod".to_string()),
+    };
+
+    let owner_uid = &owner.uid;
+    let owner_kind = &owner.kind;
+    let owner_name = &owner.name;
+
+    match owner_kind.as_str() {
+        "ReplicaSet" | "Job" => {
+            if let Some(cached) = owner_cache.get(owner_uid) {
+                return (cached.uid.clone(), cached.name.clone(), cached.kind.clone());
+            }
+
+            let resolved = resolve_intermediate_owner(client, owner_uid, owner_name, owner_kind).await;
+            let mapping = resolved.unwrap_or(OwnerMapping {
+                uid: owner_uid.clone(),
+                name: owner_name.clone(),
+                kind: owner_kind.clone(),
+            });
+            let result = (mapping.uid.clone(), mapping.name.clone(), mapping.kind.clone());
+            owner_cache.insert(owner_uid.clone(), mapping);
+            result
+        }
+        "StatefulSet" | "DaemonSet" | "CronJob" => {
+            (owner_uid.clone(), owner_name.clone(), owner_kind.clone())
+        }
+        _ => {
+            (owner_uid.clone(), owner_name.clone(), owner_kind.clone())
+        }
+    }
+}
+
+async fn resolve_intermediate_owner(
+    client: &Client,
+    owner_uid: &str,
+    _owner_name: &str,
+    owner_kind: &str,
+) -> Option<OwnerMapping> {
+    match owner_kind {
+        "ReplicaSet" => {
+            let rs_api: Api<ReplicaSet> = Api::all(client.clone());
+            let rs_list = rs_api.list(&ListParams::default()
+                .fields(&format!("metadata.uid={}", owner_uid))).await.ok()?;
+            let rs = rs_list.items.into_iter().next()?;
+            let rs_owners = rs.metadata.owner_references.unwrap_or_default();
+            let deployment = select_controller_owner(&rs_owners)?;
+            Some(OwnerMapping {
+                uid: deployment.uid.clone(),
+                name: deployment.name.clone(),
+                kind: deployment.kind.clone(),
+            })
+        }
+        "Job" => {
+            let job_api: Api<Job> = Api::all(client.clone());
+            let job_list = job_api.list(&ListParams::default()
+                .fields(&format!("metadata.uid={}", owner_uid))).await.ok()?;
+            let job = job_list.items.into_iter().next()?;
+            let job_owners = job.metadata.owner_references.unwrap_or_default();
+            let cronjob = select_controller_owner(&job_owners)?;
+            Some(OwnerMapping {
+                uid: cronjob.uid.clone(),
+                name: cronjob.name.clone(),
+                kind: cronjob.kind.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 // ─── Pod enumeration via eBPF (most accurate) ───────────────────
@@ -688,7 +736,7 @@ fn enumerate_pods_ebpf(
     node_name: &str,
     total_cpu_uw: u64,
     total_mem_uw: u64,
-    pod_cache: &HashMap<String, PodInfo>,
+    pod_cache: &HashMap<String, PodIdentity>,
     snapshot: &ebpf::EbpfSnapshot,
 ) -> Vec<PodPowerReport> {
     // Build pid → pod_uid mapping from cgroup data
@@ -753,7 +801,8 @@ fn enumerate_pods_ebpf(
             };
             let pod_mem_uw = (total_mem_uw as f64 * mem_ratio) as u64;
 
-            let (pod_name, namespace) = match pod_cache.get(pod_uid) {
+            let identity = pod_cache.get(pod_uid);
+            let (pod_name, namespace) = match identity {
                 Some(info) => (info.name.clone(), info.namespace.clone()),
                 None => (pod_uid.clone(), "unknown".into()),
             };
@@ -770,6 +819,11 @@ fn enumerate_pods_ebpf(
                 io_uw: 0,
                 total_uw: pod_cpu_uw + pod_mem_uw,
                 timestamp: SystemTime::now(),
+                workload_uid: identity.map(|i| i.workload_uid.clone()).unwrap_or_default(),
+                workload_name: identity.map(|i| i.workload_name.clone()).unwrap_or_default(),
+                workload_kind: identity.map(|i| i.workload_kind.clone()).unwrap_or_default(),
+                workload_category: identity.map(|i| i.workload_category.as_str().to_string()).unwrap_or("application".into()),
+                labels: identity.map(|i| i.labels.clone()).unwrap_or_default(),
             }
         })
         .collect()
@@ -798,7 +852,7 @@ fn enumerate_pods_ebpf_weighted(
     total_mem_uw: u64,
     total_llc_misses: u64,
     core_counters: &[perf_counters::CoreCounterDeltas],
-    pod_cache: &HashMap<String, PodInfo>,
+    pod_cache: &HashMap<String, PodIdentity>,
     snapshot: &ebpf::EbpfSnapshot,
     alpha: f64,
     beta: f64,
@@ -949,7 +1003,8 @@ fn enumerate_pods_ebpf_weighted(
         };
         let mem = (total_mem_uw as f64 * mem_ratio) as u64;
 
-        let (pod_name, namespace) = match pod_cache.get(*pod_uid) {
+        let identity = pod_cache.get(*pod_uid);
+        let (pod_name, namespace) = match identity {
             Some(info) => (info.name.clone(), info.namespace.clone()),
             None => ((*pod_uid).clone(), "unknown".into()),
         };
@@ -966,6 +1021,11 @@ fn enumerate_pods_ebpf_weighted(
             io_uw: 0,
             total_uw: cpu + mem,
             timestamp: SystemTime::now(),
+            workload_uid: identity.map(|i| i.workload_uid.clone()).unwrap_or_default(),
+            workload_name: identity.map(|i| i.workload_name.clone()).unwrap_or_default(),
+            workload_kind: identity.map(|i| i.workload_kind.clone()).unwrap_or_default(),
+            workload_category: identity.map(|i| i.workload_category.as_str().to_string()).unwrap_or("application".into()),
+            labels: identity.map(|i| i.labels.clone()).unwrap_or_default(),
         }
     }).collect()
 }
@@ -1097,7 +1157,7 @@ fn enumerate_pods(
     total_io_uw: u64,
     total_llc_misses: u64,
     core_counters: &[perf_counters::CoreCounterDeltas],
-    pod_cache: &HashMap<String, PodInfo>,
+    pod_cache: &HashMap<String, PodIdentity>,
     prev_cpu_ticks: &mut HashMap<u32, u64>,
     prev_page_faults: &mut HashMap<u32, (u64, u64)>,
     prev_io_bytes: &mut HashMap<u32, u64>,
@@ -1317,7 +1377,8 @@ fn enumerate_pods(
             let pod_io_uw = (total_io_uw as f64 * net_ratio) as u64;
 
             // Resolve pod name and namespace
-            let (pod_name, namespace) = match pod_cache.get(pod_uid) {
+            let identity = pod_cache.get(pod_uid);
+            let (pod_name, namespace) = match identity {
                 Some(info) => (info.name.clone(), info.namespace.clone()),
                 None => (pod_uid.clone(), "unknown".into()),
             };
@@ -1334,6 +1395,11 @@ fn enumerate_pods(
                 io_uw: pod_io_uw,
                 total_uw: pod_cpu_uw + pod_mem_uw + pod_storage_uw + pod_io_uw,
                 timestamp: SystemTime::now(),
+                workload_uid: identity.map(|i| i.workload_uid.clone()).unwrap_or_default(),
+                workload_name: identity.map(|i| i.workload_name.clone()).unwrap_or_default(),
+                workload_kind: identity.map(|i| i.workload_kind.clone()).unwrap_or_default(),
+                workload_category: identity.map(|i| i.workload_category.as_str().to_string()).unwrap_or("application".into()),
+                labels: identity.map(|i| i.labels.clone()).unwrap_or_default(),
             }
         })
         .collect()
@@ -1396,7 +1462,7 @@ fn count_processes() -> u32 {
 ///
 /// DCGM metrics include pod name and namespace directly:
 ///   DCGM_FI_DEV_POWER_USAGE{...,namespace="default",pod="gpu-workload-xxx",...} 49.157
-async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, http_client: &reqwest::Client, pod_cache: &HashMap<String, PodInfo>) {
+async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, http_client: &reqwest::Client, pod_cache: &HashMap<String, PodIdentity>) {
     let dcgm_url = if let Ok(url) = std::env::var("DCGM_EXPORTER_URL") {
         if url.contains(".svc") {
             hardware::gpu::discover_dcgm_url_pub().unwrap_or(url)
@@ -1447,15 +1513,14 @@ async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, 
             pod.gpu_uw += gpu_uw;
             pod.recalculate_total();
         } else {
-            // Pod not in cgroup scan — look up real UID from K8s API cache
-            let real_uid = pod_cache.iter()
-                .find(|(_, info)| info.name == pod_name && info.namespace == namespace)
-                .map(|(uid, _)| uid.clone());
+            // Pod not in cgroup scan -- look up real UID from K8s API cache
+            let found = pod_cache.iter()
+                .find(|(_, info)| info.name == pod_name && info.namespace == namespace);
 
-            if let Some(uid) = real_uid {
+            if let Some((uid, identity)) = found {
                 pods.push(PodPowerReport {
                     node_name: node_name.to_string(),
-                    pod_uid: uid,
+                    pod_uid: uid.clone(),
                     pod_name,
                     namespace,
                     cpu_uw: 0,
@@ -1465,6 +1530,11 @@ async fn add_gpu_power_to_pods(node_name: &str, pods: &mut Vec<PodPowerReport>, 
                     io_uw: 0,
                     total_uw: gpu_uw,
                     timestamp: SystemTime::now(),
+                    workload_uid: identity.workload_uid.clone(),
+                    workload_name: identity.workload_name.clone(),
+                    workload_kind: identity.workload_kind.clone(),
+                    workload_category: identity.workload_category.as_str().to_string(),
+                    labels: identity.labels.clone(),
                 });
             } else {
                 log::debug!("GPU pod {}/{} not in K8s cache — skipping", namespace, pod_name);
