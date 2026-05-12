@@ -236,3 +236,76 @@ func (in *RedfishSpec) DeepCopyInto(out *RedfishSpec) {
 func (in *NodeBMCEntry) DeepCopyInto(out *NodeBMCEntry) {
 	*out = *in
 }
+
+// ─── KeckApplication ────────────────────────────────────────────
+
+func (in *KeckApplication) DeepCopyInto(out *KeckApplication) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *KeckApplication) DeepCopy() *KeckApplication {
+	if in == nil { return nil }
+	out := new(KeckApplication)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KeckApplication) DeepCopyObject() runtime.Object {
+	return in.DeepCopy()
+}
+
+func (in *KeckApplicationList) DeepCopyInto(out *KeckApplicationList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]KeckApplication, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+func (in *KeckApplicationList) DeepCopy() *KeckApplicationList {
+	if in == nil { return nil }
+	out := new(KeckApplicationList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KeckApplicationList) DeepCopyObject() runtime.Object {
+	return in.DeepCopy()
+}
+
+func (in *KeckApplicationSpec) DeepCopyInto(out *KeckApplicationSpec) {
+	*out = *in
+	if in.Namespaces != nil {
+		out.Namespaces = make([]string, len(in.Namespaces))
+		copy(out.Namespaces, in.Namespaces)
+	}
+	if in.WorkloadSelectors != nil {
+		out.WorkloadSelectors = make([]WorkloadSelector, len(in.WorkloadSelectors))
+		for i := range in.WorkloadSelectors {
+			in.WorkloadSelectors[i].DeepCopyInto(&out.WorkloadSelectors[i])
+		}
+	}
+}
+
+func (in *WorkloadSelector) DeepCopyInto(out *WorkloadSelector) {
+	*out = *in
+	if in.MatchLabels != nil {
+		out.MatchLabels = make(map[string]string, len(in.MatchLabels))
+		for k, v := range in.MatchLabels {
+			out.MatchLabels[k] = v
+		}
+	}
+}
+
+func (in *KeckApplicationStatus) DeepCopyInto(out *KeckApplicationStatus) {
+	*out = *in
+	in.LastUpdated.DeepCopyInto(&out.LastUpdated)
+}

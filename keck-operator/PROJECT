@@ -31,4 +31,13 @@ resources:
     kind: PowerProfile
     path: github.com/avivgt/keck/keck-operator/api/v1alpha1
     version: v1alpha1
+  - api:
+      crdVersion: v1
+      namespaced: false
+    controller: true
+    domain: keck.io
+    group: keck.io
+    kind: KeckApplication
+    path: github.com/avivgt/keck/keck-operator/api/v1alpha1
+    version: v1alpha1
 version: "3"

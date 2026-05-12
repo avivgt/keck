@@ -263,3 +263,60 @@ type PowerProfileList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PowerProfile `json:"items"`
 }
+
+// ─── KeckApplication ────────────────────────────────────────────
+// Declarative application boundary for power grouping.
+// Groups pods from multiple namespaces, operators, and workloads
+// into a single application-level power view.
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Watts",type=string,JSONPath=`.status.totalWatts`
+// +kubebuilder:printcolumn:name="Pods",type=integer,JSONPath=`.status.podCount`
+// +kubebuilder:printcolumn:name="Workloads",type=integer,JSONPath=`.status.workloadCount`
+type KeckApplication struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   KeckApplicationSpec   `json:"spec,omitempty"`
+	Status KeckApplicationStatus `json:"status,omitempty"`
+}
+
+type KeckApplicationSpec struct {
+	// Namespaces whose pods belong to this application.
+	// All pods in these namespaces are included.
+	// +optional
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// Label selectors for pods that belong to this application.
+	// Pods matching ANY selector are included (OR logic).
+	// +optional
+	WorkloadSelectors []WorkloadSelector `json:"workloadSelectors,omitempty"`
+}
+
+type WorkloadSelector struct {
+	// Labels that pods must have to match this selector (AND logic within one selector).
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+}
+
+type KeckApplicationStatus struct {
+	// Current total power in watts
+	TotalWatts float64 `json:"totalWatts,omitempty"`
+
+	// Number of matched pods
+	PodCount int32 `json:"podCount,omitempty"`
+
+	// Number of matched workloads (Deployments, StatefulSets, etc.)
+	WorkloadCount int32 `json:"workloadCount,omitempty"`
+
+	// Last time the status was updated
+	LastUpdated metav1.Time `json:"lastUpdated,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type KeckApplicationList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []KeckApplication `json:"items"`
+}

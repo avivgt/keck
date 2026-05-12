@@ -1,0 +1,70 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: keckapplications.keck.io
+spec:
+  group: keck.io
+  names:
+    kind: KeckApplication
+    listKind: KeckApplicationList
+    plural: keckapplications
+    singular: keckapplication
+    shortNames:
+      - kapp
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Watts
+          type: string
+          jsonPath: .status.totalWatts
+        - name: Pods
+          type: integer
+          jsonPath: .status.podCount
+        - name: Workloads
+          type: integer
+          jsonPath: .status.workloadCount
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              properties:
+                namespaces:
+                  type: array
+                  items:
+                    type: string
+                workloadSelectors:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      matchLabels:
+                        type: object
+                        additionalProperties:
+                          type: string
+            status:
+              type: object
+              properties:
+                totalWatts:
+                  type: number
+                podCount:
+                  type: integer
+                  format: int32
+                workloadCount:
+                  type: integer
+                  format: int32
+                lastUpdated:
+                  type: string
+                  format: date-time
