@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod workload;
-
 //! K8s enrichment: maps cgroup IDs → containers → pods → namespaces.
 //!
 //! Uses the kubelet API (not the API server) to resolve container metadata,
@@ -10,6 +8,8 @@ pub mod workload;
 //! The enrichment layer takes an AttributionSnapshot with raw PIDs/cgroup_ids
 //! and fills in container names, pod UIDs, namespaces, and aggregates
 //! process power into container/pod/namespace power.
+
+pub mod workload;
 
 use std::collections::HashMap;
 
