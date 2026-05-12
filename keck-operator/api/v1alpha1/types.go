@@ -59,6 +59,14 @@ type AgentSpec struct {
 	// +kubebuilder:default=false
 	GPUEnabled bool `json:"gpuEnabled,omitempty"`
 
+	// Labels to capture from pod metadata for application grouping.
+	// Entries ending in /* are treated as prefix matches.
+	// Default: app.kubernetes.io/name, app.kubernetes.io/part-of,
+	//   app.kubernetes.io/component, argocd.argoproj.io/instance,
+	//   operators.coreos.com/*, olm.owner
+	// +optional
+	CapturedLabels []string `json:"capturedLabels,omitempty"`
+
 	// Redfish BMC configuration (optional)
 	Redfish *RedfishSpec `json:"redfish,omitempty"`
 }
