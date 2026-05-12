@@ -30,6 +30,16 @@
   {
     "type": "console.navigation/href",
     "properties": {
+      "id": "power-applications",
+      "name": "Applications",
+      "href": "/power-management/applications",
+      "section": "power-management",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
       "id": "power-namespaces",
       "name": "Namespaces",
       "href": "/power-management/namespaces",
@@ -84,6 +94,16 @@
       "path": "/power-management/namespaces/:ns",
       "component": {
         "$codeRef": "NamespaceView"
+      }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/power-management/applications",
+      "component": {
+        "$codeRef": "ApplicationsView"
       }
     }
   },
