@@ -7,6 +7,7 @@
 
 mod aggregator;
 mod api;
+mod application;
 mod carbon;
 mod scheduler;
 
@@ -26,6 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Keck cluster controller");
 
     let aggregator = Arc::new(RwLock::new(ClusterAggregator::new()));
+
+    // Start background KeckApplication CRD watcher
+    let agg_clone = aggregator.clone();
+    tokio::spawn(async move {
+        application::watch_applications(agg_clone).await;
+    });
 
     // Start REST API (handles both agent reports and UI queries)
     api::start_rest_server(aggregator, "0.0.0.0:8080").await?;

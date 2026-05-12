@@ -151,21 +151,30 @@ pub struct NodeSummary {
     pub last_seen_secs_ago: u64,
 }
 
+/// Cached application definition from a KeckApplication CRD.
+#[derive(Clone, Debug)]
+pub struct ApplicationDef {
+    pub name: String,
+    pub namespaces: Vec<String>,
+    pub label_selectors: Vec<HashMap<String, String>>,
+}
+
 #[derive(Clone, Debug)]
 pub enum GroupBy {
     Workload,
     Label(String),
     Namespace,
+    Application,
 }
 
 impl GroupBy {
     pub fn parse(raw: &str) -> Self {
-        if raw == "namespace" {
-            GroupBy::Namespace
-        } else if let Some(label_key) = raw.strip_prefix("label:") {
-            GroupBy::Label(label_key.to_string())
-        } else {
-            GroupBy::Workload
+        match raw {
+            "namespace" => GroupBy::Namespace,
+            "workload" => GroupBy::Workload,
+            "application" => GroupBy::Application,
+            s if s.starts_with("label:") => GroupBy::Label(s[6..].to_string()),
+            _ => GroupBy::Application,
         }
     }
 }
@@ -212,6 +221,9 @@ pub struct ClusterAggregator {
     /// Key: namespace, Value: timestamped power values
     history: HashMap<String, Vec<(SystemTime, u64)>>,
     history_retention: Duration,
+
+    /// Cached KeckApplication definitions for application-level grouping
+    applications: Vec<ApplicationDef>,
 }
 
 impl ClusterAggregator {
@@ -222,7 +234,13 @@ impl ClusterAggregator {
             staleness_threshold: Duration::from_secs(60),
             history: HashMap::new(),
             history_retention: Duration::from_secs(3600), // 1 hour
+            applications: Vec::new(),
         }
+    }
+
+    /// Replace the cached application definitions (called by the CRD watcher).
+    pub fn set_applications(&mut self, apps: Vec<ApplicationDef>) {
+        self.applications = apps;
     }
 
     /// Ingest a report from a node agent.
@@ -443,7 +461,27 @@ impl ClusterAggregator {
             .collect()
     }
 
-    /// Group pods by workload, label, or namespace and return aggregated power.
+    /// Match a pod report against cached application definitions.
+    /// Returns the application name if matched, None otherwise.
+    fn match_application(&self, report: &PodPowerReport) -> Option<String> {
+        for app in &self.applications {
+            // Check namespace membership
+            if app.namespaces.contains(&report.namespace) {
+                return Some(app.name.clone());
+            }
+            // Check label selectors (all labels in any selector entry must match)
+            for selector in &app.label_selectors {
+                if !selector.is_empty()
+                    && selector.iter().all(|(k, v)| report.labels.get(k) == Some(v))
+                {
+                    return Some(app.name.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Group pods by workload, label, namespace, or application and return aggregated power.
     pub fn group_power(&self, group_by: GroupBy, category: Option<&str>) -> Vec<GroupPower> {
         let mut groups: HashMap<String, GroupPower> = HashMap::new();
 
@@ -472,6 +510,30 @@ impl ClusterAggregator {
                 }
                 GroupBy::Namespace => {
                     (report.namespace.clone(), report.namespace.clone(), "Namespace".to_string())
+                }
+                GroupBy::Application => {
+                    if let Some(app_name) = self.match_application(report) {
+                        // Pod matched a KeckApplication definition
+                        (
+                            format!("app:{}", app_name),
+                            app_name,
+                            "KeckApplication".to_string(),
+                        )
+                    } else if let Some(part_of) = report.labels.get("app.kubernetes.io/part-of") {
+                        // Fallback: auto-group by part-of label
+                        (
+                            format!("auto:{}", part_of),
+                            part_of.clone(),
+                            "auto-detected".to_string(),
+                        )
+                    } else {
+                        // Unmatched pod goes to "Other"
+                        (
+                            "other".to_string(),
+                            "Other".to_string(),
+                            "ungrouped".to_string(),
+                        )
+                    }
                 }
             };
 
