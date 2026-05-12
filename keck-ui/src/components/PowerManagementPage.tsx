@@ -179,6 +179,25 @@ const PowerManagementPage: React.FC = () => {
                         {data.platform_watts > 0 ? `${((data.idle_watts / data.platform_watts) * 100).toFixed(0)}%` : ""}
                       </td>
                     </tr>
+                    {(data as any).category_power && (
+                      <>
+                        <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                          <td style={{ padding: "10px 8px", color: "#3e8635" }}>Applications</td>
+                          <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.application_watts)}</td>
+                          <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>user workloads</td>
+                        </tr>
+                        <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                          <td style={{ padding: "10px 8px", color: "#0066cc" }}>Operators</td>
+                          <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.operator_watts)}</td>
+                          <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>OLM-managed</td>
+                        </tr>
+                        <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                          <td style={{ padding: "10px 8px", color: "#6753ac" }}>Platform</td>
+                          <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.platform_watts)}</td>
+                          <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>openshift-* / kube-system</td>
+                        </tr>
+                      </>
+                    )}
                     <tr>
                       <td style={{ padding: "10px 8px" }}>Infrastructure</td>
                       <td style={{ padding: "10px 8px", textAlign: "right" }}>{data.node_count} nodes, {data.pod_count} pods</td>
