@@ -217,6 +217,17 @@ async fn handle_cluster(
         })
     }).collect();
 
+    let category_power = {
+        let apps = agg.group_power(crate::aggregator::GroupBy::Workload, Some("application"));
+        let ops = agg.group_power(crate::aggregator::GroupBy::Workload, Some("operator"));
+        let platform_groups = agg.group_power(crate::aggregator::GroupBy::Workload, Some("platform"));
+        serde_json::json!({
+            "application_watts": apps.iter().map(|g| g.total_uw).sum::<u64>() as f64 / 1e6,
+            "operator_watts": ops.iter().map(|g| g.total_uw).sum::<u64>() as f64 / 1e6,
+            "platform_watts": platform_groups.iter().map(|g| g.total_uw).sum::<u64>() as f64 / 1e6,
+        })
+    };
+
     Json(serde_json::json!({
         "cpu_watts": power.cpu_uw as f64 / 1e6,
         "memory_watts": power.memory_uw as f64 / 1e6,
@@ -229,6 +240,7 @@ async fn handle_cluster(
         "node_count": power.node_count,
         "pod_count": power.pod_count,
         "avg_error_ratio": power.avg_error_ratio,
+        "category_power": category_power,
         "nodes": nodes_json,
         "sources": agg.all_sources().iter().map(|s| {
             serde_json::json!({
