@@ -39,7 +39,8 @@
       "ClusterOverview": "./src/components/cluster/ClusterOverview",
       "NamespaceView": "./src/components/namespace/NamespaceView",
       "NodesView": "./src/components/node/NodesView",
-      "PodView": "./src/components/pod/PodView"
+      "PodView": "./src/components/pod/PodView",
+      "ApplicationsView": "./src/components/application/ApplicationsView"
     },
     "dependencies": {
       "@console/pluginAPI": "*"
