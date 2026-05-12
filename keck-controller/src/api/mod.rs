@@ -60,6 +60,8 @@ pub async fn start_rest_server(
         .route("/api/v1/nodes", get(handle_nodes))
         .route("/api/v1/pods-by-node", get(handle_node))
         .route("/api/v1/pods-by-uid", get(handle_pod))
+        // Application-level grouping
+        .route("/api/v1/applications", get(handle_applications))
         // Health check
         .route("/healthz", get(handle_healthz))
         // CORS: allow specific origin if configured, deny cross-origin by default
@@ -412,6 +414,47 @@ async fn handle_pod(
     })))
 }
 
+/// GET /api/v1/applications -- grouped power by workload, label, or namespace.
+async fn handle_applications(
+    State(state): State<ServerState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let agg = state.aggregator.read().await;
+    let group_by = params.get("group_by")
+        .map(|s| crate::aggregator::GroupBy::parse(s))
+        .unwrap_or(crate::aggregator::GroupBy::Workload);
+    let category = params.get("category").map(|s| s.as_str());
+
+    let groups = agg.group_power(group_by, category);
+
+    let list: Vec<serde_json::Value> = groups.iter().map(|g| {
+        serde_json::json!({
+            "group_key": g.group_key,
+            "group_name": g.group_name,
+            "group_kind": g.group_kind,
+            "namespace": g.namespace,
+            "category": g.category,
+            "cpu_watts": g.cpu_uw as f64 / 1e6,
+            "memory_watts": g.memory_uw as f64 / 1e6,
+            "gpu_watts": g.gpu_uw as f64 / 1e6,
+            "storage_watts": g.storage_uw as f64 / 1e6,
+            "io_watts": g.io_uw as f64 / 1e6,
+            "total_watts": g.total_uw as f64 / 1e6,
+            "pod_count": g.pod_count,
+            "pods": g.pods.iter().map(|p| serde_json::json!({
+                "pod_uid": p.pod_uid,
+                "pod_name": p.pod_name,
+                "cpu_watts": p.cpu_uw as f64 / 1e6,
+                "memory_watts": p.memory_uw as f64 / 1e6,
+                "gpu_watts": p.gpu_uw as f64 / 1e6,
+                "total_watts": p.total_uw as f64 / 1e6,
+            })).collect::<Vec<_>>(),
+        })
+    }).collect();
+
+    Json(serde_json::Value::Array(list))
+}
+
 /// GET /healthz
 async fn handle_healthz() -> &'static str {
     "ok"
@@ -434,6 +477,7 @@ mod tests {
             .route("/api/v1/nodes", get(handle_nodes))
             .route("/api/v1/pods-by-node", get(handle_node))
             .route("/api/v1/pods-by-uid", get(handle_pod))
+            .route("/api/v1/applications", get(handle_applications))
             .route("/healthz", get(handle_healthz))
             .with_state(state)
     }
@@ -471,8 +515,15 @@ mod tests {
                 cpu_uw: 1_000_000,
                 memory_uw: 500_000,
                 gpu_uw: 0,
+                storage_uw: 0,
+                io_uw: 0,
                 total_uw: 1_500_000,
                 timestamp: std::time::SystemTime::now(),
+                workload_uid: String::new(),
+                workload_name: String::new(),
+                workload_kind: String::new(),
+                workload_category: "application".into(),
+                labels: std::collections::HashMap::new(),
             }],
         }
     }
@@ -746,5 +797,70 @@ mod tests {
         assert!(json["data_quality"]["memory"].is_object());
         assert!(json["data_quality"]["gpu"].is_object());
         assert!(json["data_quality"]["platform"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_get_applications_by_workload() {
+        let state = make_state();
+        {
+            let mut agg = state.aggregator.write().await;
+            let mut report = make_agent_report();
+            report.pods[0].workload_uid = "deploy-1".into();
+            report.pods[0].workload_name = "web".into();
+            report.pods[0].workload_kind = "Deployment".into();
+            report.pods[0].workload_category = "application".into();
+            agg.ingest(report);
+        }
+        let app = build_app(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/applications?group_by=workload")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["group_name"], "web");
+        assert_eq!(arr[0]["group_kind"], "Deployment");
+        assert_eq!(arr[0]["category"], "application");
+    }
+
+    #[tokio::test]
+    async fn test_get_applications_with_category_filter() {
+        let state = make_state();
+        {
+            let mut agg = state.aggregator.write().await;
+            let mut report = make_agent_report();
+            report.pods[0].workload_category = "application".into();
+            agg.ingest(report);
+
+            let mut report2 = make_agent_report();
+            report2.node.node_name = "node-2".into();
+            report2.pods[0].pod_uid = "uid-platform".into();
+            report2.pods[0].namespace = "openshift-monitoring".into();
+            report2.pods[0].workload_category = "platform".into();
+            report2.pods[0].node_name = "node-2".into();
+            agg.ingest(report2);
+        }
+        let app = build_app(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/applications?category=application")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["category"], "application");
     }
 }
