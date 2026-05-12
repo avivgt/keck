@@ -22,4 +22,5 @@ func init() {
 	SchemeBuilder.Register(&KeckCluster{}, &KeckClusterList{})
 	SchemeBuilder.Register(&PowerBudget{}, &PowerBudgetList{})
 	SchemeBuilder.Register(&PowerProfile{}, &PowerProfileList{})
+	SchemeBuilder.Register(&KeckApplication{}, &KeckApplicationList{})
 }
