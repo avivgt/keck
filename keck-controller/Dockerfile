@@ -13,6 +13,9 @@ COPY Cargo.toml ./
 COPY keck-common/ keck-common/
 COPY keck-controller/ keck-controller/
 
+# Bust cache: force recompile
+RUN date > /tmp/build-stamp
+
 # Create minimal workspace Cargo.toml for controller only
 RUN printf '[workspace]\nresolver = "2"\nmembers = ["keck-common", "keck-controller"]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\nlicense = "Apache-2.0"\n\n[workspace.dependencies]\nthiserror = "2"\nlog = "0.4"\n' > Cargo.toml
 

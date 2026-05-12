@@ -34,6 +34,7 @@ pub struct ServerState {
     api_key: Option<String>,
 }
 
+// v2: added /api/v1/applications endpoint and category_power to cluster response
 /// Start the REST API server.
 pub async fn start_rest_server(
     aggregator: Arc<RwLock<ClusterAggregator>>,
