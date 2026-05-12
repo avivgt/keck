@@ -63,9 +63,39 @@ export interface PodPower {
   total_watts: number;
 }
 
+export interface PodPowerSummary {
+  pod_uid: string;
+  pod_name: string;
+  cpu_watts: number;
+  memory_watts: number;
+  gpu_watts: number;
+  total_watts: number;
+}
+
+export interface GroupPower {
+  group_key: string;
+  group_name: string;
+  group_kind: string;
+  namespace: string;
+  category: string;
+  cpu_watts: number;
+  memory_watts: number;
+  gpu_watts: number;
+  storage_watts: number;
+  io_watts: number;
+  total_watts: number;
+  pod_count: number;
+  pods: PodPowerSummary[];
+}
+
 export const api = {
   getClusterPower: () => get<ClusterPower>("/api/v1/cluster"),
   getNamespaces: () => get<NamespacePower[]>("/api/v1/namespaces"),
   getNamespacePods: (ns: string) => get<PodPower[]>(`/api/v1/pods-by-namespace?ns=${encodeURIComponent(ns)}`),
   getNodes: () => get<NodeSummary[]>("/api/v1/nodes"),
+  getApplications: (groupBy: string = "workload", category?: string) => {
+    let url = `/api/v1/applications?group_by=${encodeURIComponent(groupBy)}`;
+    if (category) url += `&category=${encodeURIComponent(category)}`;
+    return get<GroupPower[]>(url);
+  },
 };
