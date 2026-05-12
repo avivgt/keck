@@ -31,6 +31,16 @@ pub struct PodPowerReport {
     pub io_uw: u64,
     pub total_uw: u64,
     pub timestamp: SystemTime,
+    #[serde(default)]
+    pub workload_uid: String,
+    #[serde(default)]
+    pub workload_name: String,
+    #[serde(default)]
+    pub workload_kind: String,
+    #[serde(default)]
+    pub workload_category: String,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 /// Node-level summary received from each agent.
@@ -139,6 +149,52 @@ pub struct NodeSummary {
     #[serde(skip)]
     pub last_seen: Instant,
     pub last_seen_secs_ago: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum GroupBy {
+    Workload,
+    Label(String),
+    Namespace,
+}
+
+impl GroupBy {
+    pub fn parse(raw: &str) -> Self {
+        if raw == "namespace" {
+            GroupBy::Namespace
+        } else if let Some(label_key) = raw.strip_prefix("label:") {
+            GroupBy::Label(label_key.to_string())
+        } else {
+            GroupBy::Workload
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GroupPower {
+    pub group_key: String,
+    pub group_name: String,
+    pub group_kind: String,
+    pub namespace: String,
+    pub category: String,
+    pub cpu_uw: u64,
+    pub memory_uw: u64,
+    pub gpu_uw: u64,
+    pub storage_uw: u64,
+    pub io_uw: u64,
+    pub total_uw: u64,
+    pub pod_count: usize,
+    pub pods: Vec<PodPowerSummary>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PodPowerSummary {
+    pub pod_uid: String,
+    pub pod_name: String,
+    pub cpu_uw: u64,
+    pub memory_uw: u64,
+    pub gpu_uw: u64,
+    pub total_uw: u64,
 }
 
 /// The cluster aggregator.
@@ -387,6 +443,80 @@ impl ClusterAggregator {
             .collect()
     }
 
+    /// Group pods by workload, label, or namespace and return aggregated power.
+    pub fn group_power(&self, group_by: GroupBy, category: Option<&str>) -> Vec<GroupPower> {
+        let mut groups: HashMap<String, GroupPower> = HashMap::new();
+
+        for state in self.pods.values() {
+            let report = &state.report;
+
+            if let Some(cat) = category {
+                if report.workload_category != cat {
+                    continue;
+                }
+            }
+
+            let (key, name, kind) = match &group_by {
+                GroupBy::Workload => {
+                    if report.workload_uid.is_empty() {
+                        (report.pod_uid.clone(), report.pod_name.clone(), "Pod".to_string())
+                    } else {
+                        (report.workload_uid.clone(), report.workload_name.clone(), report.workload_kind.clone())
+                    }
+                }
+                GroupBy::Label(label_key) => {
+                    match report.labels.get(label_key) {
+                        Some(val) => (val.clone(), val.clone(), label_key.clone()),
+                        None => continue,
+                    }
+                }
+                GroupBy::Namespace => {
+                    (report.namespace.clone(), report.namespace.clone(), "Namespace".to_string())
+                }
+            };
+
+            let entry = groups.entry(key.clone()).or_insert_with(|| GroupPower {
+                group_key: key,
+                group_name: name.clone(),
+                group_kind: kind.clone(),
+                namespace: report.namespace.clone(),
+                category: report.workload_category.clone(),
+                cpu_uw: 0,
+                memory_uw: 0,
+                gpu_uw: 0,
+                storage_uw: 0,
+                io_uw: 0,
+                total_uw: 0,
+                pod_count: 0,
+                pods: Vec::new(),
+            });
+
+            entry.cpu_uw += report.cpu_uw;
+            entry.memory_uw += report.memory_uw;
+            entry.gpu_uw += report.gpu_uw;
+            entry.storage_uw += report.storage_uw;
+            entry.io_uw += report.io_uw;
+            entry.total_uw += report.total_uw;
+            entry.pod_count += 1;
+            entry.pods.push(PodPowerSummary {
+                pod_uid: report.pod_uid.clone(),
+                pod_name: report.pod_name.clone(),
+                cpu_uw: report.cpu_uw,
+                memory_uw: report.memory_uw,
+                gpu_uw: report.gpu_uw,
+                total_uw: report.total_uw,
+            });
+
+            if entry.namespace != report.namespace {
+                entry.namespace = String::new();
+            }
+        }
+
+        let mut result: Vec<GroupPower> = groups.into_values().collect();
+        result.sort_by(|a, b| b.total_uw.cmp(&a.total_uw));
+        result
+    }
+
     /// Evict stale pods and nodes that haven't reported recently.
     fn evict_stale(&mut self) {
         let threshold = Instant::now() - self.staleness_threshold;
@@ -423,8 +553,15 @@ mod tests {
             cpu_uw: cpu,
             memory_uw: mem,
             gpu_uw: gpu,
+            storage_uw: 0,
+            io_uw: 0,
             total_uw: cpu + mem + gpu,
             timestamp: SystemTime::now(),
+            workload_uid: String::new(),
+            workload_name: String::new(),
+            workload_kind: String::new(),
+            workload_category: "application".into(),
+            labels: HashMap::new(),
         }
     }
 
@@ -1002,5 +1139,90 @@ mod tests {
         let power = agg.cluster_power();
         assert_eq!(power.cpu_uw, 9000);
         assert_eq!(power.node_count, 1);
+    }
+
+    // ─── group_power() tests ────────────────────────────────────
+
+    #[test]
+    fn test_group_power_by_workload() {
+        let mut agg = ClusterAggregator::new();
+        let mut pod_a = make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0);
+        pod_a.workload_uid = "deploy-uid-1".into();
+        pod_a.workload_name = "web".into();
+        pod_a.workload_kind = "Deployment".into();
+        pod_a.workload_category = "application".into();
+
+        let mut pod_b = make_pod("node-1", "uid-b", "web-2", "default", 2000, 800, 0);
+        pod_b.workload_uid = "deploy-uid-1".into();
+        pod_b.workload_name = "web".into();
+        pod_b.workload_kind = "Deployment".into();
+        pod_b.workload_category = "application".into();
+
+        let mut pod_c = make_pod("node-1", "uid-c", "api-1", "default", 3000, 1000, 0);
+        pod_c.workload_uid = "deploy-uid-2".into();
+        pod_c.workload_name = "api".into();
+        pod_c.workload_kind = "Deployment".into();
+        pod_c.workload_category = "application".into();
+
+        agg.ingest(make_report(make_node("node-1", 10000, 5000, 0, None, 1000), vec![pod_a, pod_b, pod_c]));
+
+        let groups = agg.group_power(GroupBy::Workload, None);
+        assert_eq!(groups.len(), 2);
+        let web = groups.iter().find(|g| g.group_name == "web").unwrap();
+        assert_eq!(web.cpu_uw, 3000);
+        assert_eq!(web.pod_count, 2);
+        let api_g = groups.iter().find(|g| g.group_name == "api").unwrap();
+        assert_eq!(api_g.cpu_uw, 3000);
+        assert_eq!(api_g.pod_count, 1);
+    }
+
+    #[test]
+    fn test_group_power_by_label() {
+        let mut agg = ClusterAggregator::new();
+        let mut pod_a = make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0);
+        pod_a.labels.insert("app.kubernetes.io/name".into(), "frontend".into());
+        pod_a.workload_category = "application".into();
+
+        let mut pod_b = make_pod("node-1", "uid-b", "api-1", "default", 2000, 800, 0);
+        pod_b.labels.insert("app.kubernetes.io/name".into(), "frontend".into());
+        pod_b.workload_category = "application".into();
+
+        let mut pod_c = make_pod("node-1", "uid-c", "db-1", "default", 3000, 1000, 0);
+        pod_c.labels.insert("app.kubernetes.io/name".into(), "backend".into());
+        pod_c.workload_category = "application".into();
+
+        agg.ingest(make_report(make_node("node-1", 10000, 5000, 0, None, 1000), vec![pod_a, pod_b, pod_c]));
+
+        let groups = agg.group_power(GroupBy::Label("app.kubernetes.io/name".into()), None);
+        assert_eq!(groups.len(), 2);
+        let frontend = groups.iter().find(|g| g.group_name == "frontend").unwrap();
+        assert_eq!(frontend.cpu_uw, 3000);
+        assert_eq!(frontend.pod_count, 2);
+    }
+
+    #[test]
+    fn test_group_power_category_filter() {
+        let mut agg = ClusterAggregator::new();
+        let mut pod_a = make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 0);
+        pod_a.workload_uid = "d1".into();
+        pod_a.workload_name = "web".into();
+        pod_a.workload_kind = "Deployment".into();
+        pod_a.workload_category = "application".into();
+
+        let mut pod_b = make_pod("node-1", "uid-b", "mon-1", "openshift-monitoring", 2000, 800, 0);
+        pod_b.workload_uid = "d2".into();
+        pod_b.workload_name = "prometheus".into();
+        pod_b.workload_kind = "StatefulSet".into();
+        pod_b.workload_category = "platform".into();
+
+        agg.ingest(make_report(make_node("node-1", 10000, 5000, 0, None, 1000), vec![pod_a, pod_b]));
+
+        let apps = agg.group_power(GroupBy::Workload, Some("application"));
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].group_name, "web");
+
+        let platform = agg.group_power(GroupBy::Workload, Some("platform"));
+        assert_eq!(platform.len(), 1);
+        assert_eq!(platform[0].group_name, "prometheus");
     }
 }
