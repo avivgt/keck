@@ -634,6 +634,7 @@ mod tests {
             memory_uw: mem,
             gpu_uw: gpu,
             platform_uw: platform,
+            psu_output_uw: None,
             idle_uw: idle,
             error_ratio: 0.05,
             pod_count: 0,

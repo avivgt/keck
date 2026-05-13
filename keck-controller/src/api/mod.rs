@@ -510,6 +510,7 @@ mod tests {
                 memory_uw: 2_000_000,
                 gpu_uw: 0,
                 platform_uw: Some(10_000_000),
+                psu_output_uw: None,
                 idle_uw: 3_000_000,
                 error_ratio: 0.05,
                 pod_count: 1,

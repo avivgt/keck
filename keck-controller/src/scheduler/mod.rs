@@ -287,6 +287,7 @@ mod tests {
             memory_uw: mem,
             gpu_uw: gpu,
             platform_uw: platform,
+            psu_output_uw: None,
             idle_uw: 1000,
             error_ratio,
             pod_count: 5,
@@ -308,8 +309,15 @@ mod tests {
             cpu_uw: cpu,
             memory_uw: 0,
             gpu_uw: 0,
+            storage_uw: 0,
+            io_uw: 0,
             total_uw: cpu,
             timestamp: std::time::SystemTime::now(),
+            workload_uid: String::new(),
+            workload_name: String::new(),
+            workload_kind: String::new(),
+            workload_category: "application".into(),
+            labels: std::collections::HashMap::new(),
         }
     }
 
