@@ -1,6 +1,6 @@
 # Keck
 
-Accurate per-workload power metering for bare metal, VMs, and Kubernetes.
+Per-workload power metering for bare metal, VMs, and Kubernetes.
 
 Named after the [W. M. Keck Observatory](https://www.keckobservatory.org/),
 Keck measures energy consumption at every level — from individual CPU cores to
