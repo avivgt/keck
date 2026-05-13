@@ -84,7 +84,7 @@ const NodesView: React.FC = () => {
                   <Th sort={getSortParams("memory_watts")}>Memory</Th>
                   <Th sort={getSortParams("gpu_watts")}>GPU</Th>
                   <Th sort={getSortParams("idle_watts")}>Idle / Other</Th>
-                  <Th sort={getSortParams("error_ratio")}>Error</Th>
+                  <Th sort={getSortParams("error_ratio")} info={{ tooltip: "Percentage of PSU power not accounted for by measured components (CPU + Memory + GPU + Storage + NIC + Fans). Lower is better. Caused by VRMs, chipset, PCIe bus, and other unmeasured subsystems." }}>Unmetered</Th>
                   <Th sort={getSortParams("pod_count")}>Pods</Th>
                   <Th>CPU Method</Th>
                 </Tr>
@@ -105,7 +105,7 @@ const NodesView: React.FC = () => {
                         color={node.error_ratio <= 0.05 ? "green" : node.error_ratio <= 0.15 ? "gold" : "red"}
                         style={{ fontSize: "12px" }}
                       >
-                        {(node.error_ratio * 100).toFixed(1)}%
+                        {(node.error_ratio * 100).toFixed(1)}% unmetered
                       </Label>
                     </Td>
                     <Td>{node.pod_count}</Td>

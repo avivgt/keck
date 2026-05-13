@@ -203,7 +203,7 @@ const PowerManagementPage: React.FC = () => {
                       <td style={{ padding: "10px 8px", textAlign: "right" }}>{data.node_count} nodes, {data.pod_count} pods</td>
                       <td style={{ padding: "10px 8px" }}>
                         <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "gold" : "red"}>
-                          RAPL {formatErrorRatio(data.avg_error_ratio)}
+                          {formatErrorRatio(data.avg_error_ratio)} unmetered
                         </Label>
                       </td>
                     </tr>
