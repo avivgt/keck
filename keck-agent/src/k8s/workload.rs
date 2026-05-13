@@ -76,18 +76,37 @@ pub fn capture_labels(
     captured
 }
 
+/// Operator namespace patterns: namespaces where OLM installs operator controllers.
+const OPERATOR_NAMESPACES: &[&str] = &[
+    "openshift-operators",
+    "openshift-operator-lifecycle-manager",
+    "openshift-marketplace",
+];
+
+/// Platform namespace prefixes: core OpenShift infrastructure.
+const PLATFORM_PREFIXES: &[&str] = &[
+    "openshift-",
+    "kube-",
+];
+
 pub fn classify_category(
     namespace: &str,
     labels: &std::collections::BTreeMap<String, String>,
 ) -> WorkloadCategory {
-    if namespace.starts_with("openshift-") || namespace == "kube-system" {
-        return WorkloadCategory::Platform;
+    if OPERATOR_NAMESPACES.contains(&namespace) {
+        return WorkloadCategory::Operator;
     }
     if labels.keys().any(|k| k.starts_with("operators.coreos.com/")) {
         return WorkloadCategory::Operator;
     }
     if labels.get("olm.owner").is_some() {
         return WorkloadCategory::Operator;
+    }
+    if PLATFORM_PREFIXES.iter().any(|p| namespace.starts_with(p)) {
+        return WorkloadCategory::Platform;
+    }
+    if namespace == "kube-system" {
+        return WorkloadCategory::Platform;
     }
     WorkloadCategory::Application
 }
@@ -185,6 +204,14 @@ mod tests {
         let mut labels = BTreeMap::new();
         labels.insert("olm.owner".into(), "my-operator.v1.0".into());
         assert_eq!(classify_category("my-operator-ns", &labels), WorkloadCategory::Operator);
+    }
+
+    #[test]
+    fn test_classify_operator_namespace() {
+        let labels = BTreeMap::new();
+        assert_eq!(classify_category("openshift-operators", &labels), WorkloadCategory::Operator);
+        assert_eq!(classify_category("openshift-operator-lifecycle-manager", &labels), WorkloadCategory::Operator);
+        assert_eq!(classify_category("openshift-marketplace", &labels), WorkloadCategory::Operator);
     }
 
     #[test]
