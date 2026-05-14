@@ -76,39 +76,64 @@ pub fn capture_labels(
     captured
 }
 
-/// Operator namespace patterns: namespaces where OLM installs operator controllers.
-const OPERATOR_NAMESPACES: &[&str] = &[
-    "openshift-operators",
+/// OLM infrastructure namespaces (always "operator" regardless of Subscriptions).
+const OLM_INFRA_NAMESPACES: &[&str] = &[
     "openshift-operator-lifecycle-manager",
     "openshift-marketplace",
 ];
 
-/// Platform namespace prefixes: core OpenShift infrastructure.
-const PLATFORM_PREFIXES: &[&str] = &[
-    "openshift-",
-    "kube-",
-];
-
+/// Classify a pod's workload category.
+///
+/// Uses OLM Subscription data to distinguish user-installed operators
+/// from built-in OpenShift platform components:
+/// - Namespace has an OLM Subscription -> operator (user-installed)
+/// - openshift-* or kube-* namespace without Subscription -> platform (built-in)
+/// - Everything else -> application
 pub fn classify_category(
     namespace: &str,
     labels: &std::collections::BTreeMap<String, String>,
+    operator_namespaces: &std::collections::HashSet<String>,
 ) -> WorkloadCategory {
-    if OPERATOR_NAMESPACES.contains(&namespace) {
+    if operator_namespaces.contains(namespace) {
+        return WorkloadCategory::Operator;
+    }
+    if OLM_INFRA_NAMESPACES.contains(&namespace) {
         return WorkloadCategory::Operator;
     }
     if labels.keys().any(|k| k.starts_with("operators.coreos.com/")) {
         return WorkloadCategory::Operator;
     }
-    if labels.get("olm.owner").is_some() {
-        return WorkloadCategory::Operator;
-    }
-    if PLATFORM_PREFIXES.iter().any(|p| namespace.starts_with(p)) {
-        return WorkloadCategory::Platform;
-    }
-    if namespace == "kube-system" {
+    if namespace.starts_with("openshift-") || namespace.starts_with("kube-") || namespace == "kube-system" {
         return WorkloadCategory::Platform;
     }
     WorkloadCategory::Application
+}
+
+/// Discover operator namespaces by listing OLM Subscriptions.
+/// Every namespace with a Subscription is a user-installed operator namespace.
+pub async fn discover_operator_namespaces(client: &kube::Client) -> std::collections::HashSet<String> {
+    use kube::api::{Api, DynamicObject};
+    use kube::core::{ApiResource, GroupVersionKind};
+
+    let gvk = GroupVersionKind::gvk("operators.coreos.com", "v1alpha1", "Subscription");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+
+    match api.list(&Default::default()).await {
+        Ok(list) => {
+            let namespaces: std::collections::HashSet<String> = list
+                .items
+                .iter()
+                .filter_map(|sub| sub.metadata.namespace.clone())
+                .collect();
+            log::info!("Discovered {} operator namespace(s) from OLM Subscriptions", namespaces.len());
+            namespaces
+        }
+        Err(e) => {
+            log::warn!("Failed to list OLM Subscriptions ({}), operator classification will use fallback", e);
+            std::collections::HashSet::new()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -180,44 +205,63 @@ mod tests {
         assert!(captured.is_empty());
     }
 
+    fn empty_op_ns() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
+    fn op_ns_with(ns: &[&str]) -> std::collections::HashSet<String> {
+        ns.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn test_classify_platform_openshift() {
+    fn test_classify_platform_openshift_builtin() {
         let labels = BTreeMap::new();
-        assert_eq!(classify_category("openshift-monitoring", &labels), WorkloadCategory::Platform);
+        assert_eq!(classify_category("openshift-monitoring", &labels, &empty_op_ns()), WorkloadCategory::Platform);
+        assert_eq!(classify_category("openshift-etcd", &labels, &empty_op_ns()), WorkloadCategory::Platform);
+        assert_eq!(classify_category("openshift-apiserver", &labels, &empty_op_ns()), WorkloadCategory::Platform);
     }
 
     #[test]
     fn test_classify_platform_kube_system() {
         let labels = BTreeMap::new();
-        assert_eq!(classify_category("kube-system", &labels), WorkloadCategory::Platform);
+        assert_eq!(classify_category("kube-system", &labels, &empty_op_ns()), WorkloadCategory::Platform);
+    }
+
+    #[test]
+    fn test_classify_operator_by_subscription() {
+        let labels = BTreeMap::new();
+        let op_ns = op_ns_with(&["openshift-cnv", "openshift-gitops-operator", "keck-system"]);
+        assert_eq!(classify_category("openshift-cnv", &labels, &op_ns), WorkloadCategory::Operator);
+        assert_eq!(classify_category("openshift-gitops-operator", &labels, &op_ns), WorkloadCategory::Operator);
+        assert_eq!(classify_category("keck-system", &labels, &op_ns), WorkloadCategory::Operator);
+    }
+
+    #[test]
+    fn test_classify_openshift_ns_without_subscription_is_platform() {
+        let labels = BTreeMap::new();
+        let op_ns = op_ns_with(&["openshift-cnv"]);
+        assert_eq!(classify_category("openshift-monitoring", &labels, &op_ns), WorkloadCategory::Platform);
+        assert_eq!(classify_category("openshift-etcd", &labels, &op_ns), WorkloadCategory::Platform);
     }
 
     #[test]
     fn test_classify_operator_by_label() {
         let mut labels = BTreeMap::new();
         labels.insert("operators.coreos.com/elasticsearch-operator".into(), "".into());
-        assert_eq!(classify_category("default", &labels), WorkloadCategory::Operator);
+        assert_eq!(classify_category("default", &labels, &empty_op_ns()), WorkloadCategory::Operator);
     }
 
     #[test]
-    fn test_classify_operator_by_olm_owner() {
-        let mut labels = BTreeMap::new();
-        labels.insert("olm.owner".into(), "my-operator.v1.0".into());
-        assert_eq!(classify_category("my-operator-ns", &labels), WorkloadCategory::Operator);
-    }
-
-    #[test]
-    fn test_classify_operator_namespace() {
+    fn test_classify_olm_infra_namespaces() {
         let labels = BTreeMap::new();
-        assert_eq!(classify_category("openshift-operators", &labels), WorkloadCategory::Operator);
-        assert_eq!(classify_category("openshift-operator-lifecycle-manager", &labels), WorkloadCategory::Operator);
-        assert_eq!(classify_category("openshift-marketplace", &labels), WorkloadCategory::Operator);
+        assert_eq!(classify_category("openshift-operator-lifecycle-manager", &labels, &empty_op_ns()), WorkloadCategory::Operator);
+        assert_eq!(classify_category("openshift-marketplace", &labels, &empty_op_ns()), WorkloadCategory::Operator);
     }
 
     #[test]
     fn test_classify_application() {
         let labels = BTreeMap::new();
-        assert_eq!(classify_category("my-app-ns", &labels), WorkloadCategory::Application);
+        assert_eq!(classify_category("my-app-ns", &labels, &empty_op_ns()), WorkloadCategory::Application);
     }
 
     #[test]

@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use ebpf::EbpfObserver;
 use hardware::{Component, PowerSource, discover_sources, procfs_root};
-use k8s::workload::{PodIdentity, classify_category, capture_labels, parse_label_config, select_controller_owner, OwnerMapping};
+use k8s::workload::{PodIdentity, classify_category, capture_labels, parse_label_config, select_controller_owner, OwnerMapping, discover_operator_namespaces};
 use kube::{Api, Client, api::ListParams};
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::batch::v1::Job;
@@ -198,6 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             parse_label_config(&raw)
         }
     };
+    let operator_namespaces = discover_operator_namespaces(&k8s_client).await;
     let mut owner_cache: OwnerCache = HashMap::new();
 
     // HTTP client for reporting to controller
@@ -236,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Initial pod cache
-    refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache, &mut owner_cache, &exact_labels, &prefix_labels).await;
+    refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache, &mut owner_cache, &exact_labels, &prefix_labels, &operator_namespaces).await;
     info!("Cached {} pods from K8s API", pod_cache.len());
 
     info!("Initial hardware read complete, entering collection loop");
@@ -246,7 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Refresh pod cache periodically
         if last_pod_refresh.elapsed() >= pod_refresh_interval {
-            refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache, &mut owner_cache, &exact_labels, &prefix_labels).await;
+            refresh_pod_cache(&k8s_client, &node_name, &mut pod_cache, &mut owner_cache, &exact_labels, &prefix_labels, &operator_namespaces).await;
             last_pod_refresh = std::time::Instant::now();
         }
 
@@ -599,6 +600,7 @@ async fn refresh_pod_cache(
     owner_cache: &mut OwnerCache,
     exact_labels: &[String],
     prefix_labels: &[String],
+    operator_namespaces: &std::collections::HashSet<String>,
 ) {
     let pods: Api<K8sPod> = Api::all(client.clone());
     let lp = ListParams::default()
@@ -625,7 +627,7 @@ async fn refresh_pod_cache(
         let owner_refs = meta.owner_references.clone().unwrap_or_default();
 
         let captured = capture_labels(&pod_labels, exact_labels, prefix_labels);
-        let category = classify_category(&namespace, &pod_labels);
+        let category = classify_category(&namespace, &pod_labels, operator_namespaces);
 
         let (wl_uid, wl_name, wl_kind) = resolve_owner(
             client, &uid, &name, &namespace, &owner_refs, owner_cache
