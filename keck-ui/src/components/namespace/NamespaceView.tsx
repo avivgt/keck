@@ -27,10 +27,10 @@ import {
 import { api, PodPower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
 
-/** Extract namespace from URL path: /power-management/namespaces/<ns> */
+/** Extract namespace from URL path: /power-consumption/namespaces/<ns> */
 function getNamespaceFromURL(): string {
   const path = window.location.pathname;
-  const prefix = "/power-management/namespaces/";
+  const prefix = "/power-consumption/namespaces/";
   const idx = path.indexOf(prefix);
   if (idx >= 0) {
     const rest = path.slice(idx + prefix.length);
@@ -126,10 +126,10 @@ const NamespaceView: React.FC = () => {
       <PageSection>
         <Breadcrumb>
           <BreadcrumbItem>
-            <Link to="/power-management">Power Management</Link>
+            <Link to="/power-consumption">Power Consumption</Link>
           </BreadcrumbItem>
           <BreadcrumbItem>
-            <Link to="/power-management/namespaces">Namespaces</Link>
+            <Link to="/power-consumption/namespaces">Namespaces</Link>
           </BreadcrumbItem>
           <BreadcrumbItem isActive>{ns}</BreadcrumbItem>
         </Breadcrumb>
