@@ -28,32 +28,22 @@ import {
 } from "@patternfly/react-table";
 import { api, NamespacePower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
+import { usePolling } from "../../utils/usePolling";
 
 type SortKey = "namespace" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "storage_watts" | "io_watts" | "pod_count";
 
 const ClusterOverview: React.FC = () => {
-  const [namespaces, setNamespaces] = React.useState<NamespacePower[]>([]);
-  const [loading, setLoading] = React.useState(true);
+  const { data: namespaces, loading } = usePolling(() => api.getNamespaces(), []);
   const [sortBy, setSortBy] = React.useState<SortKey>("total_watts");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const history = useHistory();
-
-  React.useEffect(() => {
-    const fetchData = () => {
-      api.getNamespaces()
-        .then(setNamespaces)
-        .finally(() => setLoading(false));
-    };
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   if (loading) {
     return <Page><PageSection><Spinner /></PageSection></Page>;
   }
 
-  const totalWatts = namespaces.reduce((sum, ns) => sum + ns.total_watts, 0);
+  const nsList = namespaces || [];
+  const totalWatts = nsList.reduce((sum, ns) => sum + ns.total_watts, 0);
 
   return (
     <Page>
@@ -62,7 +52,7 @@ const ClusterOverview: React.FC = () => {
           Power by Namespace
         </Title>
         <p style={{ marginTop: 4, color: "var(--pf-v6-global--Color--200)" }}>
-          {namespaces.length} namespaces, {formatWatts(totalWatts)} total.
+          {nsList.length} namespaces, {formatWatts(totalWatts)} total.
           Click a namespace to see pod-level detail.
         </p>
       </PageSection>
@@ -233,7 +223,7 @@ const ClusterOverview: React.FC = () => {
 
       <PageSection>
         {namespaces.length > 0 ? (() => {
-          const sorted = [...namespaces].sort((a, b) => {
+          const sorted = [...nsList].sort((a, b) => {
             const av = a[sortBy] as any;
             const bv = b[sortBy] as any;
             if (typeof av === "string") {

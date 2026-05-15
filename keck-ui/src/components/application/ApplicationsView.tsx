@@ -28,6 +28,7 @@ import {
 } from "@patternfly/react-table";
 import { api, GroupPower } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
+import { usePolling } from "../../utils/usePolling";
 
 type SortKey = "group_name" | "total_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "storage_watts" | "io_watts" | "pod_count";
 
@@ -42,25 +43,18 @@ const TAB_LABELS: Record<Category, string> = {
 };
 
 const ApplicationsView: React.FC = () => {
-  const [groups, setGroups] = React.useState<GroupPower[]>([]);
-  const [loading, setLoading] = React.useState(true);
   const [category, setCategory] = React.useState<Category>("all");
   const [groupBy, setGroupBy] = React.useState("application");
   const [sortBy, setSortBy] = React.useState<SortKey>("total_watts");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [groupByOpen, setGroupByOpen] = React.useState(false);
 
-  React.useEffect(() => {
-    const fetchData = () => {
-      const cat = category === "all" ? undefined : category;
-      api.getApplications(groupBy, cat)
-        .then(setGroups)
-        .finally(() => setLoading(false));
-    };
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [category, groupBy]);
+  const cat = category === "all" ? undefined : category;
+  const { data: groupsData, loading } = usePolling(
+    () => api.getApplications(groupBy, cat),
+    [category, groupBy],
+  );
+  const groups = groupsData || [];
 
   if (loading) {
     return <Page><PageSection><Spinner /></PageSection></Page>;
@@ -114,7 +108,7 @@ const ApplicationsView: React.FC = () => {
 
       <PageSection>
         <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
-          <Tabs activeKey={category} onSelect={(_e, key) => { setLoading(true); setCategory(String(key) as Category); }}>
+          <Tabs activeKey={category} onSelect={(_e, key) => setCategory(String(key) as Category)}>
             <Tab eventKey="all" title={<TabTitleText>All</TabTitleText>} />
             <Tab eventKey="application" title={<TabTitleText>Applications</TabTitleText>} />
             <Tab eventKey="operator" title={<TabTitleText>Operators</TabTitleText>} />

@@ -23,25 +23,15 @@ import {
 } from "@patternfly/react-table";
 import { api, NodeSummary } from "../../utils/api";
 import { formatWatts } from "../../utils/format";
+import { usePolling } from "../../utils/usePolling";
 
 type SortKey = "node_name" | "platform_watts" | "cpu_watts" | "memory_watts" | "gpu_watts" | "idle_watts" | "error_ratio" | "pod_count";
 
 const NodesView: React.FC = () => {
-  const [nodes, setNodes] = React.useState<NodeSummary[]>([]);
-  const [loading, setLoading] = React.useState(true);
+  const { data: nodesData, loading } = usePolling(() => api.getNodes(), []);
+  const nodes = nodesData || [];
   const [sortBy, setSortBy] = React.useState<SortKey>("platform_watts");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
-
-  React.useEffect(() => {
-    const fetchData = () => {
-      api.getNodes()
-        .then(setNodes)
-        .finally(() => setLoading(false));
-    };
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   if (loading) {
     return <Page><PageSection><Spinner /></PageSection></Page>;
