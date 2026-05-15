@@ -25,24 +25,10 @@ import {
 import { ChartDonut } from "@patternfly/react-charts";
 import { api, ClusterPower } from "../utils/api";
 import { formatWatts, formatErrorRatio, errorStatus } from "../utils/format";
+import { usePolling } from "../utils/usePolling";
 
 const PowerManagementPage: React.FC = () => {
-  const [data, setData] = React.useState<ClusterPower | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    const fetchData = () => {
-      api.getClusterPower()
-        .then(setData)
-        .catch((e) => setError(e.message))
-        .finally(() => setLoading(false));
-    };
-
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data, loading, error } = usePolling(() => api.getClusterPower(), []);
 
   if (loading) {
     return (
