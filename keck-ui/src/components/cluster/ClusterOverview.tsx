@@ -222,7 +222,7 @@ const ClusterOverview: React.FC = () => {
       </PageSection>
 
       <PageSection>
-        {namespaces.length > 0 ? (() => {
+        {nsList.length > 0 ? (() => {
           const sorted = [...nsList].sort((a, b) => {
             const av = a[sortBy] as any;
             const bv = b[sortBy] as any;
