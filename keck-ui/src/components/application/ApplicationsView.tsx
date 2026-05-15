@@ -34,6 +34,13 @@ type SortKey = "group_name" | "total_watts" | "cpu_watts" | "memory_watts" | "gp
 const CATEGORIES = ["all", "application", "operator", "platform"] as const;
 type Category = typeof CATEGORIES[number];
 
+const TAB_LABELS: Record<Category, string> = {
+  all: "All",
+  application: "Applications",
+  operator: "Operators",
+  platform: "Cluster Operators",
+};
+
 const ApplicationsView: React.FC = () => {
   const [groups, setGroups] = React.useState<GroupPower[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -91,6 +98,11 @@ const ApplicationsView: React.FC = () => {
     return "green";
   };
 
+  const categoryLabel = (cat: string) => {
+    if (cat === "platform") return "cluster operator";
+    return cat;
+  };
+
   return (
     <Page>
       <PageSection>
@@ -102,11 +114,11 @@ const ApplicationsView: React.FC = () => {
 
       <PageSection>
         <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
-          <Tabs activeKey={category} onSelect={(_e, key) => setCategory(key as Category)}>
+          <Tabs activeKey={category} onSelect={(_e, key) => { setLoading(true); setCategory(String(key) as Category); }}>
             <Tab eventKey="all" title={<TabTitleText>All</TabTitleText>} />
             <Tab eventKey="application" title={<TabTitleText>Applications</TabTitleText>} />
             <Tab eventKey="operator" title={<TabTitleText>Operators</TabTitleText>} />
-            <Tab eventKey="platform" title={<TabTitleText>Platform</TabTitleText>} />
+            <Tab eventKey="platform" title={<TabTitleText>Cluster Operators</TabTitleText>} />
           </Tabs>
           <div style={{ marginLeft: "auto" }}>
             <Select
@@ -149,7 +161,7 @@ const ApplicationsView: React.FC = () => {
                 <Tr key={g.group_key}>
                   <Td style={{ fontWeight: 600 }}>{g.group_name}</Td>
                   <Td><Label style={{ fontSize: "11px" }}>{g.group_kind}</Label></Td>
-                  <Td><Label color={categoryColor(g.category)} style={{ fontSize: "11px" }}>{g.category}</Label></Td>
+                  <Td><Label color={categoryColor(g.category)} style={{ fontSize: "11px" }}>{categoryLabel(g.category)}</Label></Td>
                   <Td style={{ fontSize: "0.9em", color: "var(--pf-v6-global--Color--200)" }}>{g.namespace || "multiple"}</Td>
                   <Td style={{ fontWeight: 600 }}>{formatWatts(g.total_watts)}</Td>
                   <Td>{formatWatts(g.cpu_watts)}</Td>
@@ -164,7 +176,7 @@ const ApplicationsView: React.FC = () => {
           </Table>
         ) : (
           <EmptyState>
-            <EmptyStateBody>No application power data available{category !== "all" ? ` for category "${category}"` : ""}.</EmptyStateBody>
+            <EmptyStateBody>No application power data available{category !== "all" ? ` for ${TAB_LABELS[category]}` : ""}.</EmptyStateBody>
           </EmptyState>
         )}
       </PageSection>
