@@ -3,7 +3,7 @@
 // API client for Keck controller.
 // Uses the console's proxy to route to keck-controller service.
 
-const BASE = "/api/proxy/plugin/keck-power-management/keck-api";
+const BASE = "/api/proxy/plugin/keck-power-consumption/keck-api";
 
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(`${BASE}${path}`);

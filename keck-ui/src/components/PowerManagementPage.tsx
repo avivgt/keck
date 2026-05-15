@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Main Power Management page — the entry point in the OpenShift console.
-// Accessible via the "Power Management" section in the left nav.
+// Main Power Consumption page — the entry point in the OpenShift console.
+// Accessible via the "Power Consumption" section in the left nav.
 
 import * as React from "react";
 import {
@@ -59,7 +59,7 @@ const PowerManagementPage: React.FC = () => {
       <Page>
         <PageSection>
           <EmptyState>
-            <Title headingLevel="h2" size="lg">Power Management</Title>
+            <Title headingLevel="h2" size="lg">Power Consumption</Title>
             <EmptyStateBody>
               {error || "No power data available. Ensure Keck agent and controller are running."}
             </EmptyStateBody>
@@ -73,7 +73,7 @@ const PowerManagementPage: React.FC = () => {
     <Page>
       <PageSection>
         <Title headingLevel="h1" size="2xl">
-          <BoltIcon /> Power Management
+          <BoltIcon /> Power Consumption
         </Title>
         <p style={{ marginTop: 8, color: "var(--pf-v6-global--Color--200)" }}>
           Real-time power consumption, carbon emissions, and cost across the cluster.

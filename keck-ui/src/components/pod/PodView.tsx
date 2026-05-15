@@ -43,10 +43,10 @@ const PodView: React.FC = () => {
       <PageSection>
         <Breadcrumb>
           <BreadcrumbItem>
-            <Link to="/power-management">Power Management</Link>
+            <Link to="/power-consumption">Power Consumption</Link>
           </BreadcrumbItem>
           <BreadcrumbItem>
-            <Link to="/power-management/namespaces">Namespaces</Link>
+            <Link to="/power-consumption/namespaces">Namespaces</Link>
           </BreadcrumbItem>
           <BreadcrumbItem isActive>Pod {uid?.slice(0, 8)}</BreadcrumbItem>
         </Breadcrumb>

@@ -274,7 +274,7 @@ const ClusterOverview: React.FC = () => {
                   <Tr
                     key={ns.namespace}
                     isClickable
-                    onRowClick={() => history.push(`/power-management/namespaces/${ns.namespace}`)}
+                    onRowClick={() => history.push(`/power-consumption/namespaces/${ns.namespace}`)}
                   >
                     <Td>{ns.namespace}</Td>
                     <Td>{formatWatts(ns.total_watts)}</Td>

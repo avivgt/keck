@@ -2,8 +2,8 @@
   {
     "type": "console.navigation/section",
     "properties": {
-      "id": "power-management",
-      "name": "Power Management",
+      "id": "power-consumption",
+      "name": "Power Consumption",
       "insertAfter": "monitoring"
     }
   },
@@ -12,8 +12,8 @@
     "properties": {
       "id": "power-overview",
       "name": "Overview",
-      "href": "/power-management",
-      "section": "power-management",
+      "href": "/power-consumption",
+      "section": "power-consumption",
       "perspective": "admin"
     }
   },
@@ -22,8 +22,8 @@
     "properties": {
       "id": "power-nodes",
       "name": "Nodes",
-      "href": "/power-management/nodes",
-      "section": "power-management",
+      "href": "/power-consumption/nodes",
+      "section": "power-consumption",
       "perspective": "admin"
     }
   },
@@ -32,8 +32,8 @@
     "properties": {
       "id": "power-applications",
       "name": "Applications",
-      "href": "/power-management/applications",
-      "section": "power-management",
+      "href": "/power-consumption/applications",
+      "section": "power-consumption",
       "perspective": "admin"
     }
   },
@@ -42,8 +42,8 @@
     "properties": {
       "id": "power-namespaces",
       "name": "Namespaces",
-      "href": "/power-management/namespaces",
-      "section": "power-management",
+      "href": "/power-consumption/namespaces",
+      "section": "power-consumption",
       "perspective": "admin"
     }
   },
@@ -52,8 +52,8 @@
     "properties": {
       "id": "power-budgets",
       "name": "Power Budgets",
-      "href": "/power-management/budgets",
-      "section": "power-management",
+      "href": "/power-consumption/budgets",
+      "section": "power-consumption",
       "perspective": "admin"
     }
   },
@@ -62,8 +62,8 @@
     "properties": {
       "id": "power-carbon",
       "name": "Carbon & Cost",
-      "href": "/power-management/carbon",
-      "section": "power-management",
+      "href": "/power-consumption/carbon",
+      "section": "power-consumption",
       "perspective": "admin"
     }
   },
@@ -71,7 +71,7 @@
     "type": "console.page/route",
     "properties": {
       "exact": true,
-      "path": "/power-management",
+      "path": "/power-consumption",
       "component": {
         "$codeRef": "PowerManagementPage"
       }
@@ -81,7 +81,7 @@
     "type": "console.page/route",
     "properties": {
       "exact": true,
-      "path": "/power-management/namespaces",
+      "path": "/power-consumption/namespaces",
       "component": {
         "$codeRef": "ClusterOverview"
       }
@@ -91,7 +91,7 @@
     "type": "console.page/route",
     "properties": {
       "exact": false,
-      "path": "/power-management/namespaces/:ns",
+      "path": "/power-consumption/namespaces/:ns",
       "component": {
         "$codeRef": "NamespaceView"
       }
@@ -101,7 +101,7 @@
     "type": "console.page/route",
     "properties": {
       "exact": true,
-      "path": "/power-management/applications",
+      "path": "/power-consumption/applications",
       "component": {
         "$codeRef": "ApplicationsView"
       }
@@ -111,7 +111,7 @@
     "type": "console.page/route",
     "properties": {
       "exact": true,
-      "path": "/power-management/nodes",
+      "path": "/power-consumption/nodes",
       "component": {
         "$codeRef": "NodesView"
       }
@@ -121,7 +121,7 @@
     "type": "console.page/route",
     "properties": {
       "exact": false,
-      "path": "/power-management/pods/:uid",
+      "path": "/power-consumption/pods/:uid",
       "component": {
         "$codeRef": "PodView"
       }
