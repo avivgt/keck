@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! KeckApplication CRD type definition and background watcher.
-//!
-//! Watches keck.io/v1alpha1 KeckApplication custom resources and feeds
-//! application definitions into the aggregator for application-level
-//! power grouping.
+//! Classification data: discovers ClusterOperators, OLM Subscriptions, and
+//! KeckApplication CRDs to classify pods into three non-overlapping categories:
+//! 1. Cluster Operator (namespace in ClusterOperator relatedObjects)
+//! 2. Operator (namespace has OLM Subscription, not a CO namespace)
+//! 3. Application (everything else)
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use kube::{Api, Client, CustomResource};
@@ -13,7 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::aggregator::ApplicationDef;
-use crate::AppDefs;
+use crate::SharedClassification;
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(group = "keck.io", version = "v1alpha1", kind = "KeckApplication")]
@@ -29,7 +30,7 @@ pub struct KeckApplicationSpec {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct WorkloadSelector {
     #[serde(default, rename = "matchLabels")]
-    pub match_labels: std::collections::HashMap<String, String>,
+    pub match_labels: HashMap<String, String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -42,16 +43,37 @@ pub struct KeckApplicationStatus {
     pub workload_count: i32,
 }
 
-/// Background loop: polls KeckApplication CRDs and ClusterOperators every 30s.
-/// Merges both into the aggregator's application definitions.
-pub async fn watch_applications(app_defs: AppDefs) {
+/// All data needed to classify and group pods. Built by the background watcher,
+/// read by API handlers. Lives in a separate std::sync::RwLock (not the aggregator).
+#[derive(Clone, Debug, Default)]
+pub struct ClassificationData {
+    /// namespace -> ClusterOperator name. Pods in these namespaces are "platform".
+    pub co_namespaces: HashMap<String, String>,
+    /// Namespaces with OLM Subscriptions (minus CO namespaces). Pods here are "operator".
+    pub operator_namespaces: HashSet<String>,
+    /// User-defined KeckApplication definitions for application grouping.
+    pub app_defs: Vec<ApplicationDef>,
+}
+
+impl ClassificationData {
+    /// Classify a pod by its namespace. Returns ("platform"|"operator"|"application", Option<co_name>).
+    pub fn classify(&self, namespace: &str) -> (&'static str, Option<&String>) {
+        if let Some(co_name) = self.co_namespaces.get(namespace) {
+            return ("platform", Some(co_name));
+        }
+        if self.operator_namespaces.contains(namespace) {
+            return ("operator", None);
+        }
+        ("application", None)
+    }
+}
+
+/// Background loop: polls K8s APIs every 30s to build classification data.
+pub async fn watch_classification(shared: SharedClassification) {
     let client = match Client::try_default().await {
         Ok(c) => c,
         Err(e) => {
-            log::warn!(
-                "KeckApplication watcher: no K8s client ({}), application grouping disabled",
-                e
-            );
+            log::warn!("Classification watcher: no K8s client ({}), disabled", e);
             return;
         }
     };
@@ -59,13 +81,24 @@ pub async fn watch_applications(app_defs: AppDefs) {
     let keck_api: Api<KeckApplication> = Api::all(client.clone());
 
     loop {
-        let mut defs: Vec<ApplicationDef> = Vec::new();
+        let mut data = ClassificationData::default();
 
-        // 1. Load KeckApplication CRDs (user-defined)
+        // 1. Discover ClusterOperator namespace mappings
+        data.co_namespaces = discover_co_namespaces(&client).await;
+
+        // 2. Discover OLM Subscription namespaces (exclude CO namespaces)
+        let sub_namespaces = discover_subscription_namespaces(&client).await;
+        for ns in sub_namespaces {
+            if !data.co_namespaces.contains_key(&ns) {
+                data.operator_namespaces.insert(ns);
+            }
+        }
+
+        // 3. Load KeckApplication CRDs
         match keck_api.list(&Default::default()).await {
             Ok(list) => {
                 for app in &list.items {
-                    defs.push(ApplicationDef {
+                    data.app_defs.push(ApplicationDef {
                         name: app.metadata.name.clone().unwrap_or_default(),
                         namespaces: app.spec.namespaces.clone(),
                         label_selectors: app
@@ -82,21 +115,23 @@ pub async fn watch_applications(app_defs: AppDefs) {
             }
         }
 
-        // 2. Load ClusterOperators (platform auto-detection)
-        let co_defs = discover_cluster_operators(&client).await;
-        defs.extend(co_defs);
+        log::info!(
+            "Classification: {} CO namespaces, {} operator namespaces, {} app defs",
+            data.co_namespaces.len(),
+            data.operator_namespaces.len(),
+            data.app_defs.len(),
+        );
 
-        if let Ok(mut guard) = app_defs.write() {
-            *guard = defs;
+        if let Ok(mut guard) = shared.write() {
+            *guard = data;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     }
 }
 
-/// Discover platform applications from ClusterOperator resources.
-/// Each ClusterOperator becomes an ApplicationDef with its related namespaces.
-async fn discover_cluster_operators(client: &Client) -> Vec<ApplicationDef> {
+/// Map each namespace to its ClusterOperator via relatedObjects.
+async fn discover_co_namespaces(client: &Client) -> HashMap<String, String> {
     use kube::api::{Api, DynamicObject};
     use kube::core::{ApiResource, GroupVersionKind};
 
@@ -107,15 +142,12 @@ async fn discover_cluster_operators(client: &Client) -> Vec<ApplicationDef> {
     let list = match api.list(&Default::default()).await {
         Ok(l) => l,
         Err(e) => {
-            log::debug!("ClusterOperator discovery unavailable ({}), skipping platform auto-detection", e);
-            return Vec::new();
+            log::debug!("ClusterOperator discovery unavailable ({})", e);
+            return HashMap::new();
         }
     };
 
-    // Build namespace -> CO assignments. Each namespace goes to the CO
-    // whose name most closely matches (e.g., openshift-etcd -> etcd CO,
-    // not kube-apiserver CO which also lists openshift-config).
-    let mut ns_to_co: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ns_to_co: HashMap<String, String> = HashMap::new();
 
     for co in &list.items {
         let co_name = co.metadata.name.clone().unwrap_or_default();
@@ -134,13 +166,9 @@ async fn discover_cluster_operators(client: &Client) -> Vec<ApplicationDef> {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            // Skip shared config namespaces -- they belong to many COs
             if ns == "openshift-config" || ns == "openshift-config-managed" {
                 continue;
             }
-            // Assign namespace to this CO, but prefer a CO that already
-            // has a more specific match (shorter distance from CO name to NS name).
-            // Simple heuristic: if the namespace contains the CO name, it's a better match.
             let dominated = ns.contains(&co_name) || ns.contains(&co_name.replace('-', "_"));
             match ns_to_co.get(&ns) {
                 None => { ns_to_co.insert(ns, co_name.clone()); }
@@ -152,21 +180,28 @@ async fn discover_cluster_operators(client: &Client) -> Vec<ApplicationDef> {
         }
     }
 
-    // Invert: CO name -> list of namespaces
-    let mut co_namespaces: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for (ns, co_name) in &ns_to_co {
-        co_namespaces.entry(co_name.clone()).or_default().push(ns.clone());
+    ns_to_co
+}
+
+/// List all namespaces that have OLM Subscriptions.
+async fn discover_subscription_namespaces(client: &Client) -> HashSet<String> {
+    use kube::api::{Api, DynamicObject};
+    use kube::core::{ApiResource, GroupVersionKind};
+
+    let gvk = GroupVersionKind::gvk("operators.coreos.com", "v1alpha1", "Subscription");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+
+    match api.list(&Default::default()).await {
+        Ok(list) => {
+            list.items
+                .iter()
+                .filter_map(|sub| sub.metadata.namespace.clone())
+                .collect()
+        }
+        Err(e) => {
+            log::debug!("OLM Subscription discovery unavailable ({})", e);
+            HashSet::new()
+        }
     }
-
-    let defs: Vec<ApplicationDef> = co_namespaces
-        .into_iter()
-        .map(|(name, namespaces)| ApplicationDef {
-            name,
-            namespaces,
-            label_selectors: Vec::new(),
-        })
-        .collect();
-
-    log::info!("Discovered {} ClusterOperator application groups", defs.len());
-    defs
 }
