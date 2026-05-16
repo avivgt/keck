@@ -13,9 +13,11 @@ mod scheduler;
 
 use std::sync::Arc;
 
-use aggregator::ClusterAggregator;
+use aggregator::{ApplicationDef, ClusterAggregator};
 use log::info;
 use tokio::sync::RwLock;
+
+pub type AppDefs = Arc<std::sync::RwLock<Vec<ApplicationDef>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,15 +29,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Keck cluster controller");
 
     let aggregator = Arc::new(RwLock::new(ClusterAggregator::new()));
+    let app_defs: AppDefs = Arc::new(std::sync::RwLock::new(Vec::new()));
 
-    // Start background KeckApplication CRD watcher
-    let agg_clone = aggregator.clone();
+    // Start background KeckApplication CRD watcher (writes to app_defs, not aggregator)
+    let app_defs_clone = app_defs.clone();
     tokio::spawn(async move {
-        application::watch_applications(agg_clone).await;
+        application::watch_applications(app_defs_clone).await;
     });
 
     // Start REST API (handles both agent reports and UI queries)
-    api::start_rest_server(aggregator, "0.0.0.0:8080").await?;
+    api::start_rest_server(aggregator, app_defs, "0.0.0.0:8080").await?;
 
     Ok(())
 }

@@ -31,13 +31,14 @@ use crate::aggregator::{AgentReport, ClusterAggregator};
 #[derive(Clone)]
 pub struct ServerState {
     aggregator: Arc<RwLock<ClusterAggregator>>,
+    app_defs: crate::AppDefs,
     api_key: Option<String>,
 }
 
-// v2: added /api/v1/applications endpoint and category_power to cluster response
 /// Start the REST API server.
 pub async fn start_rest_server(
     aggregator: Arc<RwLock<ClusterAggregator>>,
+    app_defs: crate::AppDefs,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("KECK_API_KEY").ok();
@@ -49,6 +50,7 @@ pub async fn start_rest_server(
 
     let state = ServerState {
         aggregator,
+        app_defs,
         api_key,
     };
     let app = Router::new()
@@ -444,7 +446,8 @@ async fn handle_applications(
         .unwrap_or(crate::aggregator::GroupBy::Application);
     let category = params.get("category").map(|s| s.as_str());
 
-    let groups = agg.group_power(group_by, category);
+    let defs = state.app_defs.read().unwrap_or_else(|e| e.into_inner());
+    let groups = agg.group_power(group_by, category, &defs);
 
     let list: Vec<serde_json::Value> = groups.iter().map(|g| {
         serde_json::json!({
@@ -504,6 +507,7 @@ mod tests {
     fn make_state() -> ServerState {
         ServerState {
             aggregator: Arc::new(RwLock::new(ClusterAggregator::new())),
+            app_defs: Arc::new(std::sync::RwLock::new(Vec::new())),
             api_key: None,
         }
     }

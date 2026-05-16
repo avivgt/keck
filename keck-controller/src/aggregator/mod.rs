@@ -222,10 +222,6 @@ pub struct ClusterAggregator {
     history: HashMap<String, Vec<(SystemTime, u64)>>,
     history_retention: Duration,
 
-    /// Cached KeckApplication definitions for application-level grouping
-    applications: Vec<ApplicationDef>,
-    /// Pre-built namespace -> application name lookup for O(1) matching
-    ns_to_app: HashMap<String, String>,
 }
 
 impl ClusterAggregator {
@@ -236,21 +232,7 @@ impl ClusterAggregator {
             staleness_threshold: Duration::from_secs(60),
             history: HashMap::new(),
             history_retention: Duration::from_secs(3600), // 1 hour
-            applications: Vec::new(),
-            ns_to_app: HashMap::new(),
         }
-    }
-
-    /// Replace the cached application definitions (called by the CRD watcher).
-    pub fn set_applications(&mut self, apps: Vec<ApplicationDef>) {
-        let mut ns_map = HashMap::new();
-        for app in &apps {
-            for ns in &app.namespaces {
-                ns_map.insert(ns.clone(), app.name.clone());
-            }
-        }
-        self.ns_to_app = ns_map;
-        self.applications = apps;
     }
 
     /// Ingest a report from a node agent.
@@ -476,28 +458,12 @@ impl ClusterAggregator {
             .collect()
     }
 
-    /// Match a pod report against cached application definitions.
-    /// Returns the application name if matched, None otherwise.
-    fn match_application(&self, report: &PodPowerReport) -> Option<String> {
-        // O(1) namespace lookup
-        if let Some(app_name) = self.ns_to_app.get(&report.namespace) {
-            return Some(app_name.clone());
-        }
-        // Fallback: check label selectors
-        for app in &self.applications {
-            for selector in &app.label_selectors {
-                if !selector.is_empty()
-                    && selector.iter().all(|(k, v)| report.labels.get(k) == Some(v))
-                {
-                    return Some(app.name.clone());
-                }
-            }
-        }
-        None
-    }
-
     /// Group pods by workload, label, namespace, or application and return aggregated power.
-    pub fn group_power(&self, group_by: GroupBy, category: Option<&str>) -> Vec<GroupPower> {
+    /// For Application grouping, pass app_defs from the separate AppDefs lock.
+    pub fn group_power(&self, group_by: GroupBy, category: Option<&str>, app_defs: &[ApplicationDef]) -> Vec<GroupPower> {
+        let ns_to_app: HashMap<String, String> = app_defs.iter()
+            .flat_map(|app| app.namespaces.iter().map(move |ns| (ns.clone(), app.name.clone())))
+            .collect();
         let mut groups: HashMap<String, GroupPower> = HashMap::new();
 
         for state in self.pods.values() {
@@ -527,7 +493,19 @@ impl ClusterAggregator {
                     (report.namespace.clone(), report.namespace.clone(), "Namespace".to_string())
                 }
                 GroupBy::Application => {
-                    if let Some(app_name) = self.match_application(report) {
+                    let matched_app = ns_to_app.get(&report.namespace).cloned().or_else(|| {
+                        for app in app_defs {
+                            for selector in &app.label_selectors {
+                                if !selector.is_empty()
+                                    && selector.iter().all(|(k, v)| report.labels.get(k) == Some(v))
+                                {
+                                    return Some(app.name.clone());
+                                }
+                            }
+                        }
+                        None
+                    });
+                    if let Some(app_name) = matched_app {
                         // Pod matched a KeckApplication definition
                         (
                             format!("app:{}", app_name),
@@ -1244,7 +1222,7 @@ mod tests {
 
         agg.ingest(make_report(make_node("node-1", 10000, 5000, 0, None, 1000), vec![pod_a, pod_b, pod_c]));
 
-        let groups = agg.group_power(GroupBy::Workload, None);
+        let groups = agg.group_power(GroupBy::Workload, None, &[]);
         assert_eq!(groups.len(), 2);
         let web = groups.iter().find(|g| g.group_name == "web").unwrap();
         assert_eq!(web.cpu_uw, 3000);
@@ -1271,7 +1249,7 @@ mod tests {
 
         agg.ingest(make_report(make_node("node-1", 10000, 5000, 0, None, 1000), vec![pod_a, pod_b, pod_c]));
 
-        let groups = agg.group_power(GroupBy::Label("app.kubernetes.io/name".into()), None);
+        let groups = agg.group_power(GroupBy::Label("app.kubernetes.io/name".into()), None, &[]);
         assert_eq!(groups.len(), 2);
         let frontend = groups.iter().find(|g| g.group_name == "frontend").unwrap();
         assert_eq!(frontend.cpu_uw, 3000);
@@ -1295,11 +1273,11 @@ mod tests {
 
         agg.ingest(make_report(make_node("node-1", 10000, 5000, 0, None, 1000), vec![pod_a, pod_b]));
 
-        let apps = agg.group_power(GroupBy::Workload, Some("application"));
+        let apps = agg.group_power(GroupBy::Workload, Some("application"), &[]);
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].group_name, "web");
 
-        let platform = agg.group_power(GroupBy::Workload, Some("platform"));
+        let platform = agg.group_power(GroupBy::Workload, Some("platform"), &[]);
         assert_eq!(platform.len(), 1);
         assert_eq!(platform[0].group_name, "prometheus");
     }
