@@ -11,9 +11,9 @@ use std::sync::Arc;
 use kube::{Api, Client, CustomResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
-use crate::aggregator::{ApplicationDef, ClusterAggregator};
+use crate::aggregator::ApplicationDef;
+use crate::AppDefs;
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(group = "keck.io", version = "v1alpha1", kind = "KeckApplication")]
@@ -44,7 +44,7 @@ pub struct KeckApplicationStatus {
 
 /// Background loop: polls KeckApplication CRDs and ClusterOperators every 30s.
 /// Merges both into the aggregator's application definitions.
-pub async fn watch_applications(aggregator: Arc<RwLock<ClusterAggregator>>) {
+pub async fn watch_applications(app_defs: AppDefs) {
     let client = match Client::try_default().await {
         Ok(c) => c,
         Err(e) => {
@@ -86,8 +86,9 @@ pub async fn watch_applications(aggregator: Arc<RwLock<ClusterAggregator>>) {
         let co_defs = discover_cluster_operators(&client).await;
         defs.extend(co_defs);
 
-        let mut agg = aggregator.write().await;
-        agg.set_applications(defs);
+        if let Ok(mut guard) = app_defs.write() {
+            *guard = defs;
+        }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     }
