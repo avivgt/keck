@@ -224,6 +224,8 @@ pub struct ClusterAggregator {
 
     /// Cached KeckApplication definitions for application-level grouping
     applications: Vec<ApplicationDef>,
+    /// Pre-built namespace -> application name lookup for O(1) matching
+    ns_to_app: HashMap<String, String>,
 }
 
 impl ClusterAggregator {
@@ -235,11 +237,19 @@ impl ClusterAggregator {
             history: HashMap::new(),
             history_retention: Duration::from_secs(3600), // 1 hour
             applications: Vec::new(),
+            ns_to_app: HashMap::new(),
         }
     }
 
     /// Replace the cached application definitions (called by the CRD watcher).
     pub fn set_applications(&mut self, apps: Vec<ApplicationDef>) {
+        let mut ns_map = HashMap::new();
+        for app in &apps {
+            for ns in &app.namespaces {
+                ns_map.insert(ns.clone(), app.name.clone());
+            }
+        }
+        self.ns_to_app = ns_map;
         self.applications = apps;
     }
 
@@ -435,6 +445,11 @@ impl ClusterAggregator {
             .unwrap_or_default()
     }
 
+    /// Iterate all pod reports (for category power sums).
+    pub fn all_pods(&self) -> impl Iterator<Item = &PodPowerReport> {
+        self.pods.values().map(|s| &s.report)
+    }
+
     /// Number of active nodes.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -464,12 +479,12 @@ impl ClusterAggregator {
     /// Match a pod report against cached application definitions.
     /// Returns the application name if matched, None otherwise.
     fn match_application(&self, report: &PodPowerReport) -> Option<String> {
+        // O(1) namespace lookup
+        if let Some(app_name) = self.ns_to_app.get(&report.namespace) {
+            return Some(app_name.clone());
+        }
+        // Fallback: check label selectors
         for app in &self.applications {
-            // Check namespace membership
-            if app.namespaces.contains(&report.namespace) {
-                return Some(app.name.clone());
-            }
-            // Check label selectors (all labels in any selector entry must match)
             for selector in &app.label_selectors {
                 if !selector.is_empty()
                     && selector.iter().all(|(k, v)| report.labels.get(k) == Some(v))
