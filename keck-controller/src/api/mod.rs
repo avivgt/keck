@@ -219,13 +219,19 @@ async fn handle_cluster(
     }).collect();
 
     let category_power = {
-        let apps = agg.group_power(crate::aggregator::GroupBy::Workload, Some("application"));
-        let ops = agg.group_power(crate::aggregator::GroupBy::Workload, Some("operator"));
-        let platform_groups = agg.group_power(crate::aggregator::GroupBy::Workload, Some("platform"));
+        let (mut app_uw, mut op_uw, mut plat_uw) = (0u64, 0u64, 0u64);
+        for pod in agg.all_pods() {
+            match pod.workload_category.as_str() {
+                "application" => app_uw += pod.total_uw,
+                "operator" => op_uw += pod.total_uw,
+                "platform" => plat_uw += pod.total_uw,
+                _ => app_uw += pod.total_uw,
+            }
+        }
         serde_json::json!({
-            "application_watts": apps.iter().map(|g| g.total_uw).sum::<u64>() as f64 / 1e6,
-            "operator_watts": ops.iter().map(|g| g.total_uw).sum::<u64>() as f64 / 1e6,
-            "platform_watts": platform_groups.iter().map(|g| g.total_uw).sum::<u64>() as f64 / 1e6,
+            "application_watts": app_uw as f64 / 1e6,
+            "operator_watts": op_uw as f64 / 1e6,
+            "platform_watts": plat_uw as f64 / 1e6,
         })
     };
 
