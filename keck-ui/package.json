@@ -1,5 +1,5 @@
 {
-  "name": "keck-power-consumption",
+  "name": "keck-power-management",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -30,7 +30,7 @@
     "webpack-dev-server": "4.15.2"
   },
   "consolePlugin": {
-    "name": "keck-power-consumption",
+    "name": "keck-power-management",
     "version": "0.1.0",
     "displayName": "Power Consumption",
     "description": "Per-workload power metering, carbon tracking, and power budgets for OpenShift",
