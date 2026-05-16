@@ -13,11 +13,12 @@ mod scheduler;
 
 use std::sync::Arc;
 
-use aggregator::{ApplicationDef, ClusterAggregator};
+use aggregator::ClusterAggregator;
+use application::ClassificationData;
 use log::info;
 use tokio::sync::RwLock;
 
-pub type AppDefs = Arc<std::sync::RwLock<Vec<ApplicationDef>>>;
+pub type SharedClassification = Arc<std::sync::RwLock<ClassificationData>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,16 +30,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Keck cluster controller");
 
     let aggregator = Arc::new(RwLock::new(ClusterAggregator::new()));
-    let app_defs: AppDefs = Arc::new(std::sync::RwLock::new(Vec::new()));
+    let classification: SharedClassification = Arc::new(std::sync::RwLock::new(ClassificationData::default()));
 
-    // Start background KeckApplication CRD watcher (writes to app_defs, not aggregator)
-    let app_defs_clone = app_defs.clone();
+    let classification_clone = classification.clone();
     tokio::spawn(async move {
-        application::watch_applications(app_defs_clone).await;
+        application::watch_classification(classification_clone).await;
     });
 
-    // Start REST API (handles both agent reports and UI queries)
-    api::start_rest_server(aggregator, app_defs, "0.0.0.0:8080").await?;
+    api::start_rest_server(aggregator, classification, "0.0.0.0:8080").await?;
 
     Ok(())
 }

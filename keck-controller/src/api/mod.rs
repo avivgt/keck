@@ -31,14 +31,14 @@ use crate::aggregator::{AgentReport, ClusterAggregator};
 #[derive(Clone)]
 pub struct ServerState {
     aggregator: Arc<RwLock<ClusterAggregator>>,
-    app_defs: crate::AppDefs,
+    classification: crate::SharedClassification,
     api_key: Option<String>,
 }
 
 /// Start the REST API server.
 pub async fn start_rest_server(
     aggregator: Arc<RwLock<ClusterAggregator>>,
-    app_defs: crate::AppDefs,
+    classification: crate::SharedClassification,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("KECK_API_KEY").ok();
@@ -50,7 +50,7 @@ pub async fn start_rest_server(
 
     let state = ServerState {
         aggregator,
-        app_defs,
+        classification,
         api_key,
     };
     let app = Router::new()
@@ -221,12 +221,13 @@ async fn handle_cluster(
     }).collect();
 
     let category_power = {
+        let cls = state.classification.read().unwrap_or_else(|e| e.into_inner());
         let (mut app_uw, mut op_uw, mut plat_uw) = (0u64, 0u64, 0u64);
         for pod in agg.all_pods() {
-            match pod.workload_category.as_str() {
-                "application" => app_uw += pod.total_uw,
-                "operator" => op_uw += pod.total_uw,
+            let (cat, _) = cls.classify(&pod.namespace);
+            match cat {
                 "platform" => plat_uw += pod.total_uw,
+                "operator" => op_uw += pod.total_uw,
                 _ => app_uw += pod.total_uw,
             }
         }
@@ -446,8 +447,8 @@ async fn handle_applications(
         .unwrap_or(crate::aggregator::GroupBy::Application);
     let category = params.get("category").map(|s| s.as_str());
 
-    let defs = state.app_defs.read().unwrap_or_else(|e| e.into_inner());
-    let groups = agg.group_power(group_by, category, &defs);
+    let cls = state.classification.read().unwrap_or_else(|e| e.into_inner());
+    let groups = agg.group_power(group_by, category, &cls);
 
     let list: Vec<serde_json::Value> = groups.iter().map(|g| {
         serde_json::json!({
@@ -507,7 +508,7 @@ mod tests {
     fn make_state() -> ServerState {
         ServerState {
             aggregator: Arc::new(RwLock::new(ClusterAggregator::new())),
-            app_defs: Arc::new(std::sync::RwLock::new(Vec::new())),
+            classification: Arc::new(std::sync::RwLock::new(crate::application::ClassificationData::default())),
             api_key: None,
         }
     }
