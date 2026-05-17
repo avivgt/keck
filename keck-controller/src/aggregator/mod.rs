@@ -518,8 +518,10 @@ impl ClusterAggregator {
                             (format!("app:{}", app_name), app_name, "KeckApplication".to_string())
                         } else if let Some(part_of) = report.labels.get("app.kubernetes.io/part-of") {
                             (format!("auto:{}", part_of), part_of.clone(), "auto-detected".to_string())
+                        } else if !report.workload_uid.is_empty() {
+                            (report.workload_uid.clone(), report.workload_name.clone(), report.workload_kind.clone())
                         } else {
-                            ("other".to_string(), "Other".to_string(), "ungrouped".to_string())
+                            (report.pod_uid.clone(), report.pod_name.clone(), "Pod".to_string())
                         }
                     }
                 }
