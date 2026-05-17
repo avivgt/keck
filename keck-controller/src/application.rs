@@ -1,47 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Classification data: discovers ClusterOperators, OLM Subscriptions, and
-//! KeckApplication CRDs to classify pods into three non-overlapping categories:
+//! Classification data: discovers ClusterOperators and OLM Subscriptions
+//! to classify pods into three non-overlapping categories:
 //! 1. Cluster Operator (namespace in ClusterOperator relatedObjects)
 //! 2. Operator (namespace has OLM Subscription, not a CO namespace)
 //! 3. Application (everything else)
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
-use kube::{Api, Client, CustomResource};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use kube::Client;
 
 use crate::aggregator::ApplicationDef;
 use crate::SharedClassification;
-
-#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
-#[kube(group = "keck.io", version = "v1alpha1", kind = "KeckApplication")]
-#[kube(status = "KeckApplicationStatus")]
-#[kube(crates(kube_core = "::kube::core", k8s_openapi = "::k8s_openapi", schemars = "::schemars"))]
-pub struct KeckApplicationSpec {
-    #[serde(default)]
-    pub namespaces: Vec<String>,
-    #[serde(default, rename = "workloadSelectors")]
-    pub workload_selectors: Vec<WorkloadSelector>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-pub struct WorkloadSelector {
-    #[serde(default, rename = "matchLabels")]
-    pub match_labels: HashMap<String, String>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-pub struct KeckApplicationStatus {
-    #[serde(default)]
-    pub total_watts: f64,
-    #[serde(default)]
-    pub pod_count: i32,
-    #[serde(default)]
-    pub workload_count: i32,
-}
 
 /// All data needed to classify and group pods. Built by the background watcher,
 /// read by API handlers. Lives in a separate std::sync::RwLock (not the aggregator).
@@ -51,7 +21,7 @@ pub struct ClassificationData {
     pub co_namespaces: HashMap<String, String>,
     /// Namespaces with OLM Subscriptions (minus CO namespaces). Pods here are "operator".
     pub operator_namespaces: HashSet<String>,
-    /// User-defined KeckApplication definitions for application grouping.
+    /// Currently unused (KeckApplication CRD removed). Reserved for future use.
     pub app_defs: Vec<ApplicationDef>,
 }
 
@@ -78,15 +48,11 @@ pub async fn watch_classification(shared: SharedClassification) {
         }
     };
 
-    let keck_api: Api<KeckApplication> = Api::all(client.clone());
-
     loop {
         let mut data = ClassificationData::default();
 
-        // 1. Discover ClusterOperator namespace mappings
         data.co_namespaces = discover_co_namespaces(&client).await;
 
-        // 2. Discover OLM Subscription namespaces (exclude CO namespaces)
         let sub_namespaces = discover_subscription_namespaces(&client).await;
         for ns in sub_namespaces {
             if !data.co_namespaces.contains_key(&ns) {
@@ -94,32 +60,10 @@ pub async fn watch_classification(shared: SharedClassification) {
             }
         }
 
-        // 3. Load KeckApplication CRDs
-        match keck_api.list(&Default::default()).await {
-            Ok(list) => {
-                for app in &list.items {
-                    data.app_defs.push(ApplicationDef {
-                        name: app.metadata.name.clone().unwrap_or_default(),
-                        namespaces: app.spec.namespaces.clone(),
-                        label_selectors: app
-                            .spec
-                            .workload_selectors
-                            .iter()
-                            .map(|s| s.match_labels.clone())
-                            .collect(),
-                    });
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to list KeckApplications: {}", e);
-            }
-        }
-
         log::info!(
-            "Classification: {} CO namespaces, {} operator namespaces, {} app defs",
+            "Classification: {} CO namespaces, {} operator namespaces",
             data.co_namespaces.len(),
             data.operator_namespaces.len(),
-            data.app_defs.len(),
         );
 
         if let Ok(mut guard) = shared.write() {
