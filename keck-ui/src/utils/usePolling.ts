@@ -13,6 +13,9 @@ export function usePolling<T>(
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
+    setData(null);
+    setLoading(true);
+
     let active = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
