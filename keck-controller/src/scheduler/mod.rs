@@ -111,7 +111,7 @@ impl PowerScheduler {
         namespace: &str,
     ) -> FilterResult {
         let aggregator = self.aggregator.read().await;
-        let nodes = aggregator.node_summaries();
+        let nodes = aggregator.node_summaries(Some("keck"));
 
         let node_map: HashMap<&str, &NodeSummary> = nodes
             .iter()
@@ -124,7 +124,7 @@ impl PowerScheduler {
         // Check namespace budget
         let budget_watts = self.config.namespace_budgets.get(namespace);
         let current_ns_power: f64 = aggregator
-            .namespace_power()
+            .namespace_power(Some("keck"))
             .iter()
             .find(|ns| ns.namespace == namespace)
             .map(|ns| ns.total_uw as f64 / 1e6)
@@ -181,7 +181,7 @@ impl PowerScheduler {
     /// Higher score = better candidate.
     pub async fn prioritize(&self, candidate_nodes: &[String]) -> PrioritizeResult {
         let aggregator = self.aggregator.read().await;
-        let nodes = aggregator.node_summaries();
+        let nodes = aggregator.node_summaries(Some("keck"));
 
         let node_map: HashMap<&str, &NodeSummary> = nodes
             .iter()

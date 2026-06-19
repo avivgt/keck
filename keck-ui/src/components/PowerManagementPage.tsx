@@ -28,7 +28,8 @@ import { formatWatts, formatErrorRatio, errorStatus } from "../utils/format";
 import { usePolling } from "../utils/usePolling";
 
 const PowerManagementPage: React.FC = () => {
-  const { data, loading, error } = usePolling(() => api.getClusterPower(), []);
+  const [method, setMethod] = React.useState<string>("keck");
+  const { data, loading, error } = usePolling(() => api.getClusterPower(method), [method]);
 
   if (loading) {
     return (
@@ -58,13 +59,44 @@ const PowerManagementPage: React.FC = () => {
   return (
     <Page>
       <PageSection>
-        <Title headingLevel="h1" size="2xl">
-          <BoltIcon /> Power Consumption
-        </Title>
-        <p style={{ marginTop: 8, color: "var(--pf-v6-global--Color--200)" }}>
-          Real-time power consumption, carbon emissions, and cost across the cluster.
-          Data refreshes every 5 seconds.
-        </p>
+        <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} alignItems={{ default: "alignItemsCenter" }}>
+          <FlexItem>
+            <Title headingLevel="h1" size="2xl">
+              <BoltIcon /> Power Consumption
+            </Title>
+            <p style={{ marginTop: 8, color: "var(--pf-v6-global--Color--200)" }}>
+              Real-time power consumption across the cluster. Data refreshes every 5 seconds.
+            </p>
+          </FlexItem>
+          <FlexItem>
+            <div style={{ display: "flex", gap: 0, border: "1px solid var(--pf-v6-global--BorderColor--100, #444)", borderRadius: 4, overflow: "hidden" }}>
+              {[
+                { value: "keck", label: "Keck" },
+                { value: "kepler", label: "Kepler" },
+              ].map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setMethod(opt.value)}
+                  style={{
+                    padding: "6px 16px",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "0.9em",
+                    fontWeight: method === opt.value ? 700 : 400,
+                    background: method === opt.value
+                      ? "var(--pf-v6-global--primary-color--100, #0066cc)"
+                      : "var(--pf-v6-global--BackgroundColor--200, #1a1a1a)",
+                    color: method === opt.value
+                      ? "#fff"
+                      : "var(--pf-v6-global--Color--200, #a1a1aa)",
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </FlexItem>
+        </Flex>
       </PageSection>
 
       <PageSection>
@@ -165,25 +197,6 @@ const PowerManagementPage: React.FC = () => {
                         {data.platform_watts > 0 ? `${((data.idle_watts / data.platform_watts) * 100).toFixed(0)}%` : ""}
                       </td>
                     </tr>
-                    {(data as any).category_power && (
-                      <>
-                        <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
-                          <td style={{ padding: "10px 8px", color: "#3e8635" }}>Applications</td>
-                          <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.application_watts)}</td>
-                          <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>user workloads</td>
-                        </tr>
-                        <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
-                          <td style={{ padding: "10px 8px", color: "#0066cc" }}>Operators</td>
-                          <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.operator_watts)}</td>
-                          <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>OLM-managed</td>
-                        </tr>
-                        <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
-                          <td style={{ padding: "10px 8px", color: "#6753ac" }}>Cluster Operators</td>
-                          <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.platform_watts)}</td>
-                          <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>oc get co</td>
-                        </tr>
-                      </>
-                    )}
                     <tr>
                       <td style={{ padding: "10px 8px" }}>Infrastructure</td>
                       <td style={{ padding: "10px 8px", textAlign: "right" }}>{data.node_count} nodes, {data.pod_count} pods</td>
@@ -200,6 +213,40 @@ const PowerManagementPage: React.FC = () => {
           </FlexItem>
         </Flex>
       </PageSection>
+
+      {/* Power by Workload Category */}
+      {(data as any).category_power && (
+        <PageSection>
+          <Card>
+            <CardTitle>Power by Workload Category</CardTitle>
+            <CardBody>
+              <p style={{ marginBottom: 12, fontSize: "0.9em", color: "var(--pf-v6-global--Color--200)" }}>
+                How pod-attributed power is distributed across workload categories.
+                This is a subset of the hardware total -- non-pod processes (kernel, systemd) are not included.
+              </p>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <tbody>
+                  <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                    <td style={{ padding: "10px 8px", color: "#3e8635" }}>Applications</td>
+                    <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.application_watts)}</td>
+                    <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>user workloads</td>
+                  </tr>
+                  <tr style={{ borderBottom: "1px solid var(--pf-v6-global--BorderColor--100)" }}>
+                    <td style={{ padding: "10px 8px", color: "#0066cc" }}>Operators</td>
+                    <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.operator_watts)}</td>
+                    <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>OLM-managed</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: "10px 8px", color: "#6753ac" }}>Cluster Operators</td>
+                    <td style={{ padding: "10px 8px", textAlign: "right", fontWeight: 600 }}>{formatWatts((data as any).category_power.platform_watts)}</td>
+                    <td style={{ padding: "10px 8px", fontSize: "0.85em", color: "var(--pf-v6-global--Color--200)" }}>oc get co</td>
+                  </tr>
+                </tbody>
+              </table>
+            </CardBody>
+          </Card>
+        </PageSection>
+      )}
 
       {/* Data Sources */}
       {(data as any).sources && (data as any).sources.length > 0 && (

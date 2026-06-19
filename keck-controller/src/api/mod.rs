@@ -191,9 +191,11 @@ async fn handle_report(
 /// GET /api/v1/cluster — cluster-wide power summary.
 async fn handle_cluster(
     State(state): State<ServerState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let agg = state.aggregator.read().await;
-    let power = agg.cluster_power();
+    let method = params.get("method").map(|s| s.as_str());
+    let power = agg.cluster_power(method);
 
     let has_platform = power.platform_uw > 0;
     let has_gpu = power.gpu_uw > 0;
@@ -203,7 +205,7 @@ async fn handle_cluster(
     let mem_info = agg.memory_source_info();
 
     // Per-node breakdown
-    let nodes = agg.node_summaries();
+    let nodes = agg.node_summaries(method);
     let nodes_json: Vec<serde_json::Value> = nodes.iter().map(|n| {
         serde_json::json!({
             "node_name": n.node_name,
@@ -223,7 +225,7 @@ async fn handle_cluster(
     let category_power = {
         let cls = state.classification.read().unwrap_or_else(|e| e.into_inner());
         let (mut app_uw, mut op_uw, mut plat_uw) = (0u64, 0u64, 0u64);
-        for pod in agg.all_pods() {
+        for pod in agg.all_pods_filtered(method) {
             let (cat, _) = cls.classify(&pod.namespace);
             match cat {
                 "platform" => plat_uw += pod.total_uw,
@@ -290,8 +292,13 @@ async fn handle_cluster(
                 }
             },
             "attribution": {
-                "method": "ebpf+proc",
-                "note": "CPU time per-process + RSS for memory. eBPF sched_switch for active pods."
+                "method": method.unwrap_or("keck"),
+                "available_methods": agg.available_methods(),
+                "note": if method == Some("kepler") {
+                    "Kepler: CPU time ratio with active/idle split."
+                } else {
+                    "Keck: frequency-weighted per-core attribution with eBPF."
+                }
             },
             "alerts": {
                 "missing_ground_truth": !has_platform,
@@ -309,9 +316,11 @@ async fn handle_cluster(
 /// GET /api/v1/namespaces — per-namespace power breakdown.
 async fn handle_namespaces(
     State(state): State<ServerState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let agg = state.aggregator.read().await;
-    let namespaces = agg.namespace_power();
+    let method = params.get("method").map(|s| s.as_str());
+    let namespaces = agg.namespace_power(method);
 
     let ns_list: Vec<serde_json::Value> = namespaces
         .iter()
@@ -338,8 +347,9 @@ async fn handle_namespace_pods(
     Query(params): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let ns = params.get("ns").cloned().unwrap_or_default();
+    let method = params.get("method").map(|s| s.as_str());
     let agg = state.aggregator.read().await;
-    let pods = agg.pods_in_namespace(&ns);
+    let pods = agg.pods_in_namespace(&ns, method);
 
     let pod_list: Vec<serde_json::Value> = pods
         .iter()
@@ -365,9 +375,11 @@ async fn handle_namespace_pods(
 /// GET /api/v1/nodes — all node summaries.
 async fn handle_nodes(
     State(state): State<ServerState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let agg = state.aggregator.read().await;
-    let nodes = agg.node_summaries();
+    let method = params.get("method").map(|s| s.as_str());
+    let nodes = agg.node_summaries(method);
 
     let node_list: Vec<serde_json::Value> = nodes
         .iter()
@@ -385,6 +397,7 @@ async fn handle_nodes(
                 "last_seen_secs_ago": n.last_seen_secs_ago,
                 "cpu_source": n.cpu_source,
                 "cpu_reading_type": n.cpu_reading_type,
+                "metering_method": n.metering_method,
             })
         })
         .collect();
@@ -531,6 +544,7 @@ mod tests {
                 memory_source: "estimated".into(),
                 cpu_reading_type: "estimated".into(),
                 sources: vec![],
+                metering_method: "keck".into(),
             },
             pods: vec![PodPowerReport {
                 node_name: "test-node".into(),
@@ -549,6 +563,7 @@ mod tests {
                 workload_kind: String::new(),
                 workload_category: "application".into(),
                 labels: std::collections::HashMap::new(),
+                metering_method: "keck".into(),
             }],
         }
     }
