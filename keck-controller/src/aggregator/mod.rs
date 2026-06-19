@@ -41,6 +41,8 @@ pub struct PodPowerReport {
     pub workload_category: String,
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub metering_method: String,
 }
 
 /// Node-level summary received from each agent.
@@ -66,6 +68,8 @@ pub struct NodePowerReport {
     pub cpu_reading_type: String,
     #[serde(default)]
     pub sources: Vec<SourceStatus>,
+    #[serde(default)]
+    pub metering_method: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -146,6 +150,7 @@ pub struct NodeSummary {
     pub headroom_uw: Option<u64>,
     pub cpu_source: String,
     pub cpu_reading_type: String,
+    pub metering_method: String,
     #[serde(skip)]
     pub last_seen: Instant,
     pub last_seen_secs_ago: u64,
@@ -208,11 +213,11 @@ pub struct PodPowerSummary {
 
 /// The cluster aggregator.
 pub struct ClusterAggregator {
-    /// Current pod state, keyed by pod_uid
-    pods: HashMap<String, PodState>,
+    /// Current pod state, keyed by (pod_uid, metering_method)
+    pods: HashMap<(String, String), PodState>,
 
-    /// Current node state, keyed by node_name
-    nodes: HashMap<String, NodeState>,
+    /// Current node state, keyed by (node_name, metering_method)
+    nodes: HashMap<(String, String), NodeState>,
 
     /// How long to keep stale data before eviction
     staleness_threshold: Duration,
@@ -235,61 +240,70 @@ impl ClusterAggregator {
         }
     }
 
-    /// Ingest a report from a node agent.
+    /// Ingest a report from a node agent or Kepler scraper.
     ///
-    /// Updates current state for the node and its pods.
-    /// Evicts pods that were previously on this node but are no longer reported
-    /// (they've been terminated or moved).
+    /// The metering_method on the NodePowerReport determines which "slot" the data
+    /// goes into. A Keck report only evicts other Keck pods on that node, not Kepler
+    /// pods, and vice versa.
     pub fn ingest(&mut self, report: AgentReport) {
         let now = Instant::now();
         let node_name = report.node.node_name.clone();
+        let method = if report.node.metering_method.is_empty() {
+            "keck".to_string()
+        } else {
+            report.node.metering_method.clone()
+        };
 
-        // Update node state
         self.nodes.insert(
-            node_name.clone(),
+            (node_name.clone(), method.clone()),
             NodeState {
                 report: report.node,
                 received_at: now,
             },
         );
 
-        // Track which pods this node currently reports
         let reported_uids: Vec<String> = report.pods.iter().map(|p| p.pod_uid.clone()).collect();
 
-        // Remove pods previously on this node that are no longer reported
-        self.pods.retain(|uid, state| {
-            if state.report.node_name == node_name && !reported_uids.contains(uid) {
-                false // Pod was on this node but no longer reported → terminated
+        // Evict only pods from the same method on the same node
+        self.pods.retain(|key, state| {
+            if key.1 == method && state.report.node_name == node_name && !reported_uids.contains(&key.0) {
+                false
             } else {
                 true
             }
         });
 
-        // Update/insert reported pods
-        for pod in report.pods {
+        for mut pod in report.pods {
             let namespace = pod.namespace.clone();
             let total = pod.total_uw;
             let ts = pod.timestamp;
+            if pod.metering_method.is_empty() {
+                pod.metering_method = method.clone();
+            }
 
             self.pods.insert(
-                pod.pod_uid.clone(),
+                (pod.pod_uid.clone(), method.clone()),
                 PodState {
                     report: pod,
                     received_at: now,
                 },
             );
 
-            // Record in history
             self.history.entry(namespace).or_default().push((ts, total));
         }
 
-        // Periodic cleanup
         self.evict_stale();
         self.trim_history();
     }
 
-    /// Get cluster-wide power summary.
-    pub fn cluster_power(&self) -> ClusterPower {
+    fn matches_method(report_method: &str, filter: Option<&str>) -> bool {
+        let m = filter.unwrap_or("keck");
+        let rm = if report_method.is_empty() { "keck" } else { report_method };
+        rm == m
+    }
+
+    /// Get cluster-wide power summary, optionally filtered by metering method.
+    pub fn cluster_power(&self, method: Option<&str>) -> ClusterPower {
         let mut cpu = 0u64;
         let mut memory = 0u64;
         let mut gpu = 0u64;
@@ -299,7 +313,10 @@ impl ClusterAggregator {
         let mut error_sum = 0.0f64;
         let mut node_count = 0usize;
 
-        for state in self.nodes.values() {
+        for ((_, _), state) in &self.nodes {
+            if !Self::matches_method(&state.report.metering_method, method) {
+                continue;
+            }
             cpu += state.report.cpu_uw;
             memory += state.report.memory_uw;
             gpu += state.report.gpu_uw;
@@ -309,6 +326,10 @@ impl ClusterAggregator {
             error_sum += state.report.error_ratio;
             node_count += 1;
         }
+
+        let pod_count = self.pods.iter()
+            .filter(|((_, _), s)| Self::matches_method(&s.report.metering_method, method))
+            .count();
 
         let total_attributed = cpu + memory + gpu;
         let psu_loss = platform.saturating_sub(psu_output);
@@ -328,16 +349,19 @@ impl ClusterAggregator {
             idle_uw: idle,
             total_attributed_uw: total_attributed,
             node_count,
-            pod_count: self.pods.len(),
+            pod_count,
             avg_error_ratio: avg_error,
         }
     }
 
-    /// Get power breakdown by namespace.
-    pub fn namespace_power(&self) -> Vec<NamespacePower> {
+    /// Get power breakdown by namespace, optionally filtered by metering method.
+    pub fn namespace_power(&self, method: Option<&str>) -> Vec<NamespacePower> {
         let mut ns_map: HashMap<String, NamespacePower> = HashMap::new();
 
         for state in self.pods.values() {
+            if !Self::matches_method(&state.report.metering_method, method) {
+                continue;
+            }
             let entry = ns_map
                 .entry(state.report.namespace.clone())
                 .or_insert_with(|| NamespacePower {
@@ -361,23 +385,24 @@ impl ClusterAggregator {
         }
 
         let mut result: Vec<NamespacePower> = ns_map.into_values().collect();
-        result.sort_by(|a, b| b.total_uw.cmp(&a.total_uw)); // Highest power first
+        result.sort_by(|a, b| b.total_uw.cmp(&a.total_uw));
         result
     }
 
-    /// Get pods for a specific namespace.
-    pub fn pods_in_namespace(&self, namespace: &str) -> Vec<&PodPowerReport> {
+    /// Get pods for a specific namespace, optionally filtered by metering method.
+    pub fn pods_in_namespace(&self, namespace: &str, method: Option<&str>) -> Vec<&PodPowerReport> {
         self.pods
             .values()
-            .filter(|s| s.report.namespace == namespace)
+            .filter(|s| s.report.namespace == namespace && Self::matches_method(&s.report.metering_method, method))
             .map(|s| &s.report)
             .collect()
     }
 
-    /// Get all node summaries (for scheduler and API).
-    pub fn node_summaries(&self) -> Vec<NodeSummary> {
+    /// Get all node summaries, optionally filtered by metering method.
+    pub fn node_summaries(&self, method: Option<&str>) -> Vec<NodeSummary> {
         self.nodes
             .values()
+            .filter(|state| Self::matches_method(&state.report.metering_method, method))
             .map(|state| {
                 let r = &state.report;
                 let used = r.cpu_uw + r.memory_uw + r.gpu_uw;
@@ -396,6 +421,7 @@ impl ClusterAggregator {
                     headroom_uw: headroom,
                     cpu_source: r.cpu_source.clone(),
                     cpu_reading_type: r.cpu_reading_type.clone(),
+                    metering_method: r.metering_method.clone(),
                     last_seen: state.received_at,
                     last_seen_secs_ago: state.received_at.elapsed().as_secs(),
                 }
@@ -405,14 +431,16 @@ impl ClusterAggregator {
 
     /// Get a specific node's summary.
     pub fn node_summary(&self, node_name: &str) -> Option<NodeSummary> {
-        self.node_summaries()
+        self.node_summaries(None)
             .into_iter()
             .find(|n| n.node_name == node_name)
     }
 
-    /// Get power for a specific pod.
+    /// Get power for a specific pod (checks all methods, returns first match).
     pub fn pod_power(&self, pod_uid: &str) -> Option<&PodPowerReport> {
-        self.pods.get(pod_uid).map(|s| &s.report)
+        self.pods.iter()
+            .find(|((uid, _), _)| uid == pod_uid)
+            .map(|(_, s)| &s.report)
     }
 
     /// Get namespace power history for trend analysis.
@@ -427,7 +455,15 @@ impl ClusterAggregator {
             .unwrap_or_default()
     }
 
-    /// Iterate all pod reports (for category power sums).
+    /// Iterate all pod reports, optionally filtered by method (for category power sums).
+    pub fn all_pods_filtered(&self, method: Option<&str>) -> Vec<&PodPowerReport> {
+        self.pods.values()
+            .filter(|s| Self::matches_method(&s.report.metering_method, method))
+            .map(|s| &s.report)
+            .collect()
+    }
+
+    /// Iterate all pod reports (unfiltered, for backward compat).
     pub fn all_pods(&self) -> impl Iterator<Item = &PodPowerReport> {
         self.pods.values().map(|s| &s.report)
     }
@@ -437,23 +473,39 @@ impl ClusterAggregator {
         self.nodes.len()
     }
 
-    /// Get CPU source info from the first reporting node.
+    /// Get CPU source info from the first Keck reporting node.
     pub fn cpu_source_info(&self) -> (String, String) {
-        self.nodes.values().next()
+        self.nodes.values()
+            .find(|s| Self::matches_method(&s.report.metering_method, Some("keck")))
+            .or_else(|| self.nodes.values().next())
             .map(|s| (s.report.cpu_source.clone(), s.report.cpu_reading_type.clone()))
             .unwrap_or(("unknown".into(), "none".into()))
     }
 
-    /// Get memory source info from the first reporting node.
+    /// List available metering methods.
+    pub fn available_methods(&self) -> Vec<String> {
+        let mut methods: Vec<String> = self.nodes.keys()
+            .map(|(_, m)| m.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        methods.sort();
+        methods
+    }
+
+    /// Get memory source info from the first Keck reporting node.
     pub fn memory_source_info(&self) -> String {
-        self.nodes.values().next()
+        self.nodes.values()
+            .find(|s| Self::matches_method(&s.report.metering_method, Some("keck")))
+            .or_else(|| self.nodes.values().next())
             .map(|s| s.report.memory_source.clone())
             .unwrap_or("unknown".into())
     }
 
-    /// Get all source statuses (merged from all nodes).
+    /// Get all source statuses (from Keck nodes only -- Kepler doesn't report sources).
     pub fn all_sources(&self) -> Vec<&SourceStatus> {
         self.nodes.values()
+            .filter(|s| Self::matches_method(&s.report.metering_method, Some("keck")))
             .flat_map(|s| s.report.sources.iter())
             .collect()
     }
@@ -577,6 +629,24 @@ impl ClusterAggregator {
         self.nodes.retain(|_, state| state.received_at > threshold);
     }
 
+    /// Remove all data for nodes that no longer exist in the cluster.
+    pub fn evict_removed_nodes(&mut self, live_node_names: &[String]) {
+        let before_nodes = self.nodes.len();
+        let before_pods = self.pods.len();
+
+        self.nodes.retain(|(name, _), _| live_node_names.contains(name));
+        self.pods.retain(|_, state| live_node_names.contains(&state.report.node_name));
+
+        let evicted_nodes = before_nodes - self.nodes.len();
+        let evicted_pods = before_pods - self.pods.len();
+        if evicted_nodes > 0 || evicted_pods > 0 {
+            log::info!(
+                "Evicted {} nodes and {} pods for removed cluster nodes",
+                evicted_nodes, evicted_pods,
+            );
+        }
+    }
+
     /// Trim history beyond retention window.
     fn trim_history(&mut self) {
         let cutoff = SystemTime::now() - self.history_retention;
@@ -614,6 +684,7 @@ mod tests {
             workload_kind: String::new(),
             workload_category: "application".into(),
             labels: HashMap::new(),
+            metering_method: String::new(),
         }
     }
 
@@ -634,6 +705,7 @@ mod tests {
             memory_source: "estimated".into(),
             cpu_reading_type: "estimated".into(),
             sources: vec![],
+            metering_method: String::new(),
         }
     }
 
@@ -764,7 +836,7 @@ mod tests {
     #[test]
     fn test_cluster_power_empty() {
         let agg = ClusterAggregator::new();
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.cpu_uw, 0);
         assert_eq!(power.memory_uw, 0);
         assert_eq!(power.gpu_uw, 0);
@@ -783,7 +855,7 @@ mod tests {
             vec![make_pod("node-1", "uid-a", "web-1", "default", 1000, 500, 200)],
         ));
 
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.cpu_uw, 5000);
         assert_eq!(power.memory_uw, 2000);
         assert_eq!(power.gpu_uw, 1000);
@@ -806,7 +878,7 @@ mod tests {
             vec![make_pod("node-2", "uid-b", "api-1", "prod", 800, 300, 100)],
         ));
 
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.cpu_uw, 8000);
         assert_eq!(power.memory_uw, 3000);
         assert_eq!(power.gpu_uw, 500);
@@ -823,7 +895,7 @@ mod tests {
             make_node("node-1", 5000, 2000, 0, None, 3000),
             vec![],
         ));
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.platform_uw, 0);
     }
 
@@ -838,7 +910,7 @@ mod tests {
         agg.ingest(make_report(node1, vec![]));
         agg.ingest(make_report(node2, vec![]));
 
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert!((power.avg_error_ratio - 0.15).abs() < 1e-10);
     }
 
@@ -847,7 +919,7 @@ mod tests {
     #[test]
     fn test_namespace_power_empty() {
         let agg = ClusterAggregator::new();
-        assert!(agg.namespace_power().is_empty());
+        assert!(agg.namespace_power(None).is_empty());
     }
 
     #[test]
@@ -861,7 +933,7 @@ mod tests {
             ],
         ));
 
-        let ns = agg.namespace_power();
+        let ns = agg.namespace_power(None);
         assert_eq!(ns.len(), 1);
         assert_eq!(ns[0].namespace, "prod");
         assert_eq!(ns[0].cpu_uw, 3000);
@@ -881,7 +953,7 @@ mod tests {
             ],
         ));
 
-        let ns = agg.namespace_power();
+        let ns = agg.namespace_power(None);
         assert_eq!(ns.len(), 3);
         // Sorted by total_uw descending
         assert_eq!(ns[0].namespace, "high-power");
@@ -901,7 +973,7 @@ mod tests {
             vec![make_pod("node-2", "uid-b", "web-2", "prod", 2000, 800, 0)],
         ));
 
-        let ns = agg.namespace_power();
+        let ns = agg.namespace_power(None);
         assert_eq!(ns.len(), 1);
         assert_eq!(ns[0].cpu_uw, 3000);
         assert_eq!(ns[0].pod_count, 2);
@@ -921,7 +993,7 @@ mod tests {
             ],
         ));
 
-        let prod_pods = agg.pods_in_namespace("prod");
+        let prod_pods = agg.pods_in_namespace("prod", None);
         assert_eq!(prod_pods.len(), 2);
         let uids: Vec<&str> = prod_pods.iter().map(|p| p.pod_uid.as_str()).collect();
         assert!(uids.contains(&"uid-a"));
@@ -936,7 +1008,7 @@ mod tests {
             vec![make_pod("node-1", "uid-a", "web-1", "prod", 1000, 500, 0)],
         ));
 
-        assert!(agg.pods_in_namespace("nonexistent").is_empty());
+        assert!(agg.pods_in_namespace("nonexistent", None).is_empty());
     }
 
     // ─── node_summaries() tests ──────────────────────────────────
@@ -950,7 +1022,7 @@ mod tests {
             vec![],
         ));
 
-        let summaries = agg.node_summaries();
+        let summaries = agg.node_summaries(None);
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].headroom_uw, Some(7000));
     }
@@ -963,7 +1035,7 @@ mod tests {
             vec![],
         ));
 
-        let summaries = agg.node_summaries();
+        let summaries = agg.node_summaries(None);
         assert_eq!(summaries[0].headroom_uw, None);
     }
 
@@ -976,7 +1048,7 @@ mod tests {
             vec![],
         ));
 
-        let summaries = agg.node_summaries();
+        let summaries = agg.node_summaries(None);
         assert_eq!(summaries[0].headroom_uw, Some(0));
     }
 
@@ -988,7 +1060,7 @@ mod tests {
         node.cpu_reading_type = "measured".into();
         agg.ingest(make_report(node, vec![]));
 
-        let summaries = agg.node_summaries();
+        let summaries = agg.node_summaries(None);
         assert_eq!(summaries[0].cpu_source, "rapl_msr");
         assert_eq!(summaries[0].cpu_reading_type, "measured");
     }
@@ -1165,7 +1237,7 @@ mod tests {
             vec![make_pod("node-1", "uid-a", "big", "default", large, large, 0)],
         ));
 
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.cpu_uw, large);
         assert_eq!(power.memory_uw, large);
     }
@@ -1178,7 +1250,7 @@ mod tests {
             vec![make_pod("node-1", "uid-a", "idle", "default", 0, 0, 0)],
         ));
 
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.total_attributed_uw, 0);
         assert_eq!(power.pod_count, 1);
     }
@@ -1189,7 +1261,7 @@ mod tests {
         agg.ingest(make_report(make_node("node-1", 5000, 2000, 0, None, 1000), vec![]));
         agg.ingest(make_report(make_node("node-1", 9000, 4000, 0, None, 2000), vec![]));
 
-        let power = agg.cluster_power();
+        let power = agg.cluster_power(None);
         assert_eq!(power.cpu_uw, 9000);
         assert_eq!(power.node_count, 1);
     }

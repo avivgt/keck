@@ -5,6 +5,15 @@
 
 const BASE = "/api/proxy/plugin/keck-power-management/keck-api";
 
+function methodParam(method?: string): string {
+  return method ? `method=${encodeURIComponent(method)}` : "";
+}
+
+function appendParam(url: string, param: string): string {
+  if (!param) return url;
+  return url.includes("?") ? `${url}&${param}` : `${url}?${param}`;
+}
+
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(`${BASE}${path}`);
   if (!response.ok) {
@@ -89,13 +98,18 @@ export interface GroupPower {
 }
 
 export const api = {
-  getClusterPower: () => get<ClusterPower>("/api/v1/cluster"),
-  getNamespaces: () => get<NamespacePower[]>("/api/v1/namespaces"),
-  getNamespacePods: (ns: string) => get<PodPower[]>(`/api/v1/pods-by-namespace?ns=${encodeURIComponent(ns)}`),
-  getNodes: () => get<NodeSummary[]>("/api/v1/nodes"),
-  getApplications: (groupBy: string = "workload", category?: string) => {
+  getClusterPower: (method?: string) =>
+    get<ClusterPower>(appendParam("/api/v1/cluster", methodParam(method))),
+  getNamespaces: (method?: string) =>
+    get<NamespacePower[]>(appendParam("/api/v1/namespaces", methodParam(method))),
+  getNamespacePods: (ns: string, method?: string) =>
+    get<PodPower[]>(appendParam(`/api/v1/pods-by-namespace?ns=${encodeURIComponent(ns)}`, methodParam(method))),
+  getNodes: (method?: string) =>
+    get<NodeSummary[]>(appendParam("/api/v1/nodes", methodParam(method))),
+  getApplications: (groupBy: string = "workload", category?: string, method?: string) => {
     let url = `/api/v1/applications?group_by=${encodeURIComponent(groupBy)}`;
     if (category) url += `&category=${encodeURIComponent(category)}`;
+    url = appendParam(url, methodParam(method));
     return get<GroupPower[]>(url);
   },
 };

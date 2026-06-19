@@ -130,7 +130,7 @@ type ImageSpec struct {
 	Tag string `json:"tag,omitempty"`
 
 	// Image pull policy
-	// +kubebuilder:default=IfNotPresent
+	// +kubebuilder:default=Always
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
 
 	// Image pull secrets

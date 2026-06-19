@@ -452,13 +452,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // When CPU source is RAPL (estimated), use eBPF per-core data for
-        // frequency-weighted attribution. When CPU source is Redfish (measured),
-        // eBPF per-core data doesn't add value — use /proc CPU time ratios.
-        // Always use /proc for full pod list + PSS + memory attribution.
-        // When CPU source is RAPL (estimated) and eBPF has data, override
-        // CPU attribution with frequency-weighted per-core data from eBPF.
-        // Get per-PID network bytes from eBPF snapshot (if available)
         let ebpf_net_bytes = ebpf_snapshot.as_ref()
             .map(|s| &s.pid_net_bytes)
             .cloned()
@@ -472,7 +465,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if cpu_type == "estimated" {
             if let Some(ref snapshot) = ebpf_snapshot {
                 if !snapshot.pid_cpu_times.is_empty() {
-                    // Resolve α/β: tuner (if enabled) > env var > default
                     let (ab_alpha, ab_beta) = coefficient_tuner.as_ref()
                         .map(|t| t.current())
                         .unwrap_or_else(|| {
@@ -481,16 +473,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (a, b)
                         });
 
-                    // Compute frequency-weighted CPU attribution from eBPF
                     let ebpf_pods = enumerate_pods_ebpf_weighted(
                         &node_name, cpu_uw, mem_uw, total_llc_misses,
                         &core_counters, &pod_cache, snapshot,
                         ab_alpha, ab_beta,
                     );
 
-                    // Override CPU and memory power for pods that eBPF saw.
-                    // The eBPF path uses PSS + LLC miss ratio for memory (more
-                    // accurate than the /proc path's PSS + page fault model).
                     if !ebpf_pods.is_empty() {
                         let ebpf_map: HashMap<String, (u64, u64)> = ebpf_pods.iter()
                             .map(|p| (p.pod_uid.clone(), (p.cpu_uw, p.memory_uw)))
@@ -1050,9 +1038,9 @@ struct ProcessMetrics {
 
 /// Fields parsed from /proc/[pid]/stat.
 struct ProcStat {
-    cpu_ticks: u64,  // utime + stime
-    minflt: u64,     // minor page faults (memory access from page cache)
-    majflt: u64,     // major page faults (disk → memory)
+    cpu_ticks: u64,
+    minflt: u64,
+    majflt: u64,
 }
 
 /// Read CPU time and page fault counters from /proc/[pid]/stat.

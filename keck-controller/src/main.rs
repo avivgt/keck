@@ -9,6 +9,7 @@ mod aggregator;
 mod api;
 mod application;
 mod carbon;
+mod kepler_scraper;
 mod scheduler;
 
 use std::sync::Arc;
@@ -37,7 +38,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         application::watch_classification(classification_clone).await;
     });
 
+    let kepler_agg = aggregator.clone();
+    tokio::spawn(async move {
+        kepler_scraper::run_kepler_scraper(kepler_agg).await;
+    });
+
+    let node_watcher_agg = aggregator.clone();
+    tokio::spawn(async move {
+        watch_cluster_nodes(node_watcher_agg).await;
+    });
+
     api::start_rest_server(aggregator, classification, "0.0.0.0:8080").await?;
 
     Ok(())
+}
+
+async fn watch_cluster_nodes(aggregator: Arc<RwLock<ClusterAggregator>>) {
+    use kube::{Api, Client, api::ListParams};
+    use k8s_openapi::api::core::v1::Node;
+
+    let client = match Client::try_default().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Node watcher: no K8s client ({}), disabled", e);
+            return;
+        }
+    };
+
+    let nodes_api: Api<Node> = Api::all(client);
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        match nodes_api.list(&ListParams::default()).await {
+            Ok(node_list) => {
+                let live: Vec<String> = node_list
+                    .items
+                    .iter()
+                    .filter_map(|n| n.metadata.name.clone())
+                    .collect();
+                let mut agg = aggregator.write().await;
+                agg.evict_removed_nodes(&live);
+            }
+            Err(e) => {
+                log::debug!("Node watcher: failed to list nodes ({})", e);
+            }
+        }
+    }
 }
