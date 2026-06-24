@@ -32,7 +32,7 @@ spec:
   image:
     repository: quay.io/aguetta
     tag: latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
 
 ---
 # BMC credentials — create this before applying the KeckCluster.

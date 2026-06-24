@@ -387,7 +387,7 @@ The fleet manager aggregates data from all clusters and provides:
 ### Accessing the Dashboard
 
 On **OpenShift**, the Keck UI integrates directly into the console as a
-Dynamic Console Plugin. After deployment, "Power Management" appears in
+Dynamic Console Plugin. After deployment, "Power Consumption" appears in
 the left navigation — no separate URL needed.
 
 For **non-OpenShift** clusters, port-forward to the controller REST API:
@@ -403,7 +403,7 @@ kubectl port-forward -n keck-system svc/keck-controller 8080:8080
 
 - [x] Kubernetes operator with OLM bundle and finalizer cleanup
 - [x] CRDs: KeckCluster, PowerBudget, PowerProfile
-- [x] OpenShift console plugin ("Power Management" in left nav)
+- [x] OpenShift console plugin ("Power Consumption" in left nav)
 - [x] GPU power via DCGM (per-pod, measured from hardware)
 - [x] Vendor-agnostic Redfish discovery (3-level probing)
 - [x] Source priority system (Measured > Estimated, auto-select)
@@ -412,6 +412,8 @@ kubectl port-forward -n keck-system svc/keck-controller 8080:8080
 - [x] Per-process memory attribution (PSS + LLC misses, cached reads)
 - [x] Container images built on OCP (agent, controller, UI)
 - [x] 139 unit tests across all components
+- [x] Side-by-side comparison with upstream Kepler (separate DaemonSet, scraped via Prometheus)
+- [x] Keck/Kepler toggle in the UI for real-time method switching
 - [ ] Prometheus /metrics endpoint
 - [ ] Fleet manager deployment
 - [ ] Carbon tracking connected to external API
