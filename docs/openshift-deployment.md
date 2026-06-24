@@ -86,7 +86,7 @@ oc start-build keck-agent --from-dir=. --follow -n keck-system
 ### 2.4 Build the UI (OpenShift Console Plugin)
 
 The Keck UI runs as an OpenShift Dynamic Console Plugin called
-"Power Management". It integrates directly into the OpenShift console
+"Power Consumption". It integrates directly into the OpenShift console
 navigation — no separate URL needed.
 
 ```bash
@@ -322,9 +322,9 @@ oc patch svc keck-controller -n keck-system --type=json -p '[
 ]'
 ```
 
-### 4.5 Deploy the Power Management Console Plugin
+### 4.5 Deploy the Power Consumption Console Plugin
 
-The UI integrates directly into the OpenShift console as "Power Management"
+The UI integrates directly into the OpenShift console as "Power Consumption"
 in the left navigation. No separate URL or route needed.
 
 ```bash
@@ -374,9 +374,9 @@ oc get consoleplugins
 # keck-power-management    ...
 ```
 
-## Step 5: Access Power Management
+## Step 5: Access Power Consumption
 
-After enabling the plugin, refresh the OpenShift console. "Power Management"
+After enabling the plugin, refresh the OpenShift console. "Power Consumption"
 appears in the left navigation under the admin perspective, after Monitoring.
 
 ```
@@ -387,7 +387,7 @@ OpenShift Console
 ├── Networking
 ├── Storage
 ├── Monitoring
-├── Power Management        ← Keck
+├── Power Consumption        ← Keck
 │   ├── Overview            — Cluster power, carbon, cost
 │   ├── Namespaces          — Per-namespace breakdown (click to drill down)
 │   ├── Nodes               — Per-node power and headroom
