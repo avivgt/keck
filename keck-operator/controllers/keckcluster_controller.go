@@ -302,7 +302,7 @@ func (r *KeckClusterReconciler) ensureRBAC(ctx context.Context, keck *keckv1alph
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{""},
-				Resources: []string{"nodes", "pods", "namespaces"},
+				Resources: []string{"nodes", "pods", "namespaces", "endpoints"},
 				Verbs:     []string{"get", "list", "watch"},
 			},
 			{
