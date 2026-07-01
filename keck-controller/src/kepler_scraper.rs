@@ -17,33 +17,84 @@ use tokio::sync::RwLock;
 
 use crate::aggregator::{AgentReport, ClusterAggregator, NodePowerReport, PodPowerReport};
 
-const KEPLER_URL_DEFAULT: &str = "http://kepler.kepler.svc:28282/metrics";
 const SCRAPE_INTERVAL: Duration = Duration::from_secs(10);
+const KEPLER_PORT: u16 = 28282;
 
 pub async fn run_kepler_scraper(aggregator: Arc<RwLock<ClusterAggregator>>) {
-    let url = std::env::var("KEPLER_METRICS_URL").unwrap_or_else(|_| KEPLER_URL_DEFAULT.into());
     let enabled = std::env::var("KEPLER_ENABLED").unwrap_or_default();
     if enabled != "true" {
         log::info!("Kepler scraper disabled (set KEPLER_ENABLED=true to enable)");
         return;
     }
 
-    log::info!("Kepler scraper starting, target: {}", url);
+    log::info!("Kepler scraper starting (discovers pod IPs from K8s endpoints)");
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
         .build()
         .expect("Failed to create HTTP client for Kepler scraper");
 
-    // Wait for Kepler to start
+    let k8s_client = match kube::Client::try_default().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Kepler scraper: no K8s client ({}), falling back to service URL", e);
+            run_single_url_scraper(client, aggregator).await;
+            return;
+        }
+    };
+
     tokio::time::sleep(Duration::from_secs(15)).await;
 
+    loop {
+        let pod_ips = discover_kepler_pod_ips(&k8s_client).await;
+        if pod_ips.is_empty() {
+            log::warn!("Kepler scraper: no Kepler pods found");
+        } else {
+            let mut total = 0;
+            for ip in &pod_ips {
+                let url = format!("http://{}:{}/metrics", ip, KEPLER_PORT);
+                match scrape_and_ingest(&client, &url, &aggregator).await {
+                    Ok(count) => total += count,
+                    Err(e) => log::warn!("Kepler scrape failed for {}: {}", ip, e),
+                }
+            }
+            log::info!("Kepler: scraped {} pods from {} endpoints", total, pod_ips.len());
+        }
+        tokio::time::sleep(SCRAPE_INTERVAL).await;
+    }
+}
+
+async fn run_single_url_scraper(client: reqwest::Client, aggregator: Arc<RwLock<ClusterAggregator>>) {
+    let url = std::env::var("KEPLER_METRICS_URL")
+        .unwrap_or_else(|_| "http://kepler.kepler.svc:28282/metrics".into());
+    log::info!("Kepler scraper fallback: using service URL {}", url);
+    tokio::time::sleep(Duration::from_secs(15)).await;
     loop {
         match scrape_and_ingest(&client, &url, &aggregator).await {
             Ok(count) => log::info!("Kepler: scraped {} pods", count),
             Err(e) => log::warn!("Kepler scrape failed: {}", e),
         }
         tokio::time::sleep(SCRAPE_INTERVAL).await;
+    }
+}
+
+async fn discover_kepler_pod_ips(client: &kube::Client) -> Vec<String> {
+    use kube::Api;
+    use k8s_openapi::api::core::v1::Endpoints;
+
+    let eps: Api<Endpoints> = Api::namespaced(client.clone(), "kepler");
+    match eps.get("kepler").await {
+        Ok(ep) => {
+            ep.subsets.unwrap_or_default()
+                .iter()
+                .flat_map(|s| s.addresses.as_ref().map_or(vec![], |v| v.clone()))
+                .map(|a| a.ip)
+                .collect()
+        }
+        Err(e) => {
+            log::debug!("Failed to get Kepler endpoints: {}", e);
+            vec![]
+        }
     }
 }
 
