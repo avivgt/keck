@@ -92,7 +92,7 @@ const NodesView: React.FC = () => {
                     <Td>{formatWatts(node.idle_watts)}</Td>
                     <Td>
                       <Label
-                        color={node.error_ratio <= 0.05 ? "green" : node.error_ratio <= 0.15 ? "gold" : "red"}
+                        color={node.error_ratio <= 0.05 ? "green" : node.error_ratio <= 0.15 ? "yellow" : "red"}
                         style={{ fontSize: "12px" }}
                       >
                         {(node.error_ratio * 100).toFixed(1)}% unmetered
@@ -101,7 +101,7 @@ const NodesView: React.FC = () => {
                     <Td>{node.pod_count}</Td>
                     <Td>
                       <Label
-                        color={node.cpu_reading_type === "measured" ? "green" : node.cpu_reading_type === "estimated" ? "gold" : "red"}
+                        color={node.cpu_reading_type === "measured" ? "green" : node.cpu_reading_type === "estimated" ? "yellow" : "red"}
                         style={{ fontSize: "11px" }}
                       >
                         {node.cpu_reading_type || "unknown"}
@@ -118,7 +118,7 @@ const NodesView: React.FC = () => {
             </Table>
           );
         })() : (
-          <EmptyState>
+          <EmptyState titleText="No Data">
             <EmptyStateBody>No node power data available.</EmptyStateBody>
           </EmptyState>
         )}
