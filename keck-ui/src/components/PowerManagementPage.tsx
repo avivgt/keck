@@ -22,7 +22,7 @@ import {
   BoltIcon,
   ServerIcon,
 } from "@patternfly/react-icons";
-import { ChartDonut } from "@patternfly/react-charts";
+import { ChartDonut } from "@patternfly/react-charts/victory";
 import { api, ClusterPower } from "../utils/api";
 import { formatWatts, formatErrorRatio, errorStatus } from "../utils/format";
 import { usePolling } from "../utils/usePolling";
@@ -45,8 +45,7 @@ const PowerManagementPage: React.FC = () => {
     return (
       <Page>
         <PageSection>
-          <EmptyState>
-            <Title headingLevel="h2" size="lg">Power Consumption</Title>
+          <EmptyState titleText="Power Consumption">
             <EmptyStateBody>
               {error || "No power data available. Ensure Keck agent and controller are running."}
             </EmptyStateBody>
@@ -201,7 +200,7 @@ const PowerManagementPage: React.FC = () => {
                       <td style={{ padding: "10px 8px" }}>Infrastructure</td>
                       <td style={{ padding: "10px 8px", textAlign: "right" }}>{data.node_count} nodes, {data.pod_count} pods</td>
                       <td style={{ padding: "10px 8px" }}>
-                        <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "gold" : "red"}>
+                        <Label color={errorStatus(data.avg_error_ratio) === "success" ? "green" : errorStatus(data.avg_error_ratio) === "warning" ? "yellow" : "red"}>
                           {formatErrorRatio(data.avg_error_ratio)} unmetered
                         </Label>
                       </td>
@@ -284,7 +283,7 @@ const PowerManagementPage: React.FC = () => {
                       </td>
                       <td style={{ padding: "8px" }}>
                         <Label
-                          color={src.reading_type === "measured" ? "green" : src.reading_type === "estimated" ? "gold" : "red"}
+                          color={src.reading_type === "measured" ? "green" : src.reading_type === "estimated" ? "yellow" : "red"}
                           style={{ fontSize: "12px", fontWeight: 500, minWidth: "75px", textAlign: "center" }}
                         >
                           {src.reading_type}
@@ -334,7 +333,7 @@ const PowerManagementPage: React.FC = () => {
                         <td style={{ padding: "8px" }}>{comp === "cpu" ? "CPU" : comp === "gpu" ? "GPU" : comp.charAt(0).toUpperCase() + comp.slice(1)}</td>
                         <td style={{ padding: "8px" }}>{q.source}</td>
                         <td style={{ padding: "8px" }}>
-                          <Label color={q.type === "measured" ? "green" : q.type === "estimated" ? "gold" : "red"}>
+                          <Label color={q.type === "measured" ? "green" : q.type === "estimated" ? "yellow" : "red"}>
                             {q.type}
                           </Label>
                         </td>

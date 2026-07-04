@@ -4,7 +4,7 @@
 // Click a namespace to drill down to pods.
 
 import * as React from "react";
-import { useHistory } from "react-router-dom";
+import { useNavigate } from "react-router";
 import {
   Page,
   PageSection,
@@ -36,7 +36,7 @@ const ClusterOverview: React.FC = () => {
   const { data: namespaces, loading } = usePolling(() => api.getNamespaces(), []);
   const [sortBy, setSortBy] = React.useState<SortKey>("total_watts");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
-  const history = useHistory();
+  const navigate = useNavigate();
 
   if (loading) {
     return <Page><PageSection><Spinner /></PageSection></Page>;
@@ -264,7 +264,7 @@ const ClusterOverview: React.FC = () => {
                   <Tr
                     key={ns.namespace}
                     isClickable
-                    onRowClick={() => history.push(`/power-consumption/namespaces/${ns.namespace}`)}
+                    onRowClick={() => navigate(`/power-consumption/namespaces/${ns.namespace}`)}
                   >
                     <Td>{ns.namespace}</Td>
                     <Td>{formatWatts(ns.total_watts)}</Td>
@@ -280,7 +280,7 @@ const ClusterOverview: React.FC = () => {
             </Table>
           );
         })() : (
-          <EmptyState>
+          <EmptyState titleText="No Data">
             <EmptyStateBody>No namespace power data available.</EmptyStateBody>
           </EmptyState>
         )}

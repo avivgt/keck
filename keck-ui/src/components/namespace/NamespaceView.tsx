@@ -3,7 +3,7 @@
 // Pod-level power for a specific namespace. Drill-down from ClusterOverview.
 
 import * as React from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import {
   Page,
   PageSection,
@@ -94,7 +94,7 @@ const NamespaceView: React.FC = () => {
     return (
       <Page>
         <PageSection>
-          <EmptyState>
+          <EmptyState titleText="No Namespace">
             <EmptyStateBody>No namespace specified in URL.</EmptyStateBody>
           </EmptyState>
         </PageSection>
@@ -110,8 +110,7 @@ const NamespaceView: React.FC = () => {
     return (
       <Page>
         <PageSection>
-          <EmptyState>
-            <Title headingLevel="h2" size="lg">Error loading pods</Title>
+          <EmptyState titleText="Error loading pods">
             <EmptyStateBody>{error}</EmptyStateBody>
           </EmptyState>
         </PageSection>
@@ -350,7 +349,7 @@ const NamespaceView: React.FC = () => {
             </Table>
           );
         })() : (
-          <EmptyState>
+          <EmptyState titleText="No Pods">
             <EmptyStateBody>No pods found in namespace {ns}.</EmptyStateBody>
           </EmptyState>
         )}

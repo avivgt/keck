@@ -4,7 +4,7 @@
 // Shows per-process and per-component power breakdown.
 
 import * as React from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link } from "react-router";
 import {
   Page,
   PageSection,
@@ -60,8 +60,7 @@ const PodView: React.FC = () => {
       </PageSection>
 
       <PageSection>
-        <EmptyState>
-          <Title headingLevel="h2" size="lg">Process Detail</Title>
+        <EmptyState titleText="Process Detail">
           <EmptyStateBody>
             Pod drill-down requires the keck-agent query API to be connected.
             This will show per-process power with per-core attribution detail.

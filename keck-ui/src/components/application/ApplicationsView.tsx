@@ -169,7 +169,7 @@ const ApplicationsView: React.FC = () => {
             </Tbody>
           </Table>
         ) : (
-          <EmptyState>
+          <EmptyState titleText="No Data">
             <EmptyStateBody>No application power data available{category !== "all" ? ` for ${TAB_LABELS[category]}` : ""}.</EmptyStateBody>
           </EmptyState>
         )}
