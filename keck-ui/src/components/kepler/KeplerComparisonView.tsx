@@ -29,7 +29,7 @@ function deltaLabel(keck: number, kepler: number): React.ReactNode {
   if (keck === 0 && kepler === 0) return "-";
   const diff = keck - kepler;
   const pct = keck > 0 ? ((diff / keck) * 100) : 0;
-  const color = Math.abs(pct) < 10 ? "green" : Math.abs(pct) < 25 ? "gold" : "red";
+  const color = Math.abs(pct) < 10 ? "green" : Math.abs(pct) < 25 ? "yellow" : "red";
   const sign = diff > 0 ? "+" : "";
   return (
     <Label color={color} style={{ fontSize: "12px" }}>
