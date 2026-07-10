@@ -252,7 +252,7 @@ impl PowerScheduler {
 
     /// Run the scheduler extender webhook server.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // TODO: Implement webhook server
+        // NOT YET IMPLEMENTED: scheduler extender webhook server
         //
         // K8s scheduler extender protocol:
         //   POST /filter    → FilterResult

@@ -33,7 +33,7 @@ impl PrometheusExporter {
     /// Called once per collection interval. Updates gauge values
     /// in the Prometheus registry.
     pub fn update(&self, snapshot: &AttributionSnapshot) {
-        // TODO: Implement with prometheus-client crate
+        // NOT YET IMPLEMENTED: prometheus-client crate metrics registry
         //
         // Node-level gauges:
         //   power_node_watts{component="cpu"}     = snapshot.node.measured.cpu_uw / 1e6
@@ -68,7 +68,7 @@ impl PrometheusExporter {
     ///
     /// Called by the HTTP handler when Prometheus scrapes /metrics.
     pub fn render(&self) -> String {
-        // TODO: Render from prometheus-client registry
+        // NOT YET IMPLEMENTED: render from prometheus-client registry
         String::from("# No metrics yet\n")
     }
 }

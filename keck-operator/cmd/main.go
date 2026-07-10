@@ -50,8 +50,9 @@ func main() {
 
 	// Register controllers
 	if err := (&controllers.KeckClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("keck-operator"),
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create KeckCluster controller")
 		os.Exit(1)

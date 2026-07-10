@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: keck-alerts
+  namespace: keck-system
+  labels:
+    app.kubernetes.io/managed-by: keck-operator
+    app.kubernetes.io/part-of: keck
+spec:
+  groups:
+    - name: keck.rules
+      rules:
+        - alert: KeckControllerDown
+          expr: up{job="keck-controller"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Keck controller is down"
+            description: "The Keck controller has been unreachable for more than 2 minutes. Power data is not being aggregated."
+
+        - alert: KeckAgentNotReporting
+          expr: keck_agent_last_report_seconds_ago > 120
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keck agent on {{ $labels.node }} is not reporting"
+            description: "Node {{ $labels.node }} has not sent a power report in {{ $value | humanize }} seconds."
+
+        - alert: KeckHighErrorRatio
+          expr: keck_node_error_ratio > 0.3
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High power reconciliation error on {{ $labels.node }}"
+            description: "Node {{ $labels.node }} has a PSU reconciliation error ratio of {{ $value | humanizePercentage }}, indicating inaccurate component-level power readings."
+
+        - alert: KeckNoPowerData
+          expr: keck_node_count == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keck has no node power data"
+            description: "No nodes are reporting power data to the Keck controller."

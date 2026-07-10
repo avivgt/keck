@@ -26,6 +26,7 @@ use tower_http::cors::CorsLayer;
 use tokio::sync::RwLock;
 
 use crate::aggregator::{AgentReport, ClusterAggregator};
+use crate::metrics::{self, ComponentLabel, NamespaceComponentLabel, NodeLabel, Metrics};
 
 /// Shared state: aggregator + optional API key for report auth.
 #[derive(Clone)]
@@ -33,12 +34,14 @@ pub struct ServerState {
     aggregator: Arc<RwLock<ClusterAggregator>>,
     classification: crate::SharedClassification,
     api_key: Option<String>,
+    metrics: Arc<Metrics>,
 }
 
 /// Start the REST API server.
 pub async fn start_rest_server(
     aggregator: Arc<RwLock<ClusterAggregator>>,
     classification: crate::SharedClassification,
+    metrics: Arc<Metrics>,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("KECK_API_KEY").ok();
@@ -52,6 +55,7 @@ pub async fn start_rest_server(
         aggregator,
         classification,
         api_key,
+        metrics,
     };
     let app = Router::new()
         // Agent report ingestion (authenticated)
@@ -65,6 +69,8 @@ pub async fn start_rest_server(
         .route("/api/v1/pods-by-uid", get(handle_pod))
         // Application-level grouping
         .route("/api/v1/applications", get(handle_applications))
+        // Prometheus metrics
+        .route("/metrics", get(handle_metrics))
         // Health check
         .route("/healthz", get(handle_healthz))
         // CORS: allow specific origin if configured, deny cross-origin by default
@@ -175,6 +181,10 @@ async fn handle_report(
 
     let node_name = report.node.node_name.clone();
     let pod_count = report.pods.len();
+
+    state.metrics.agent_report_total
+        .get_or_create(&NodeLabel { node: node_name.clone() })
+        .inc();
 
     let mut agg = state.aggregator.write().await;
     agg.ingest(report);
@@ -491,6 +501,36 @@ async fn handle_applications(
     Json(serde_json::Value::Array(list))
 }
 
+/// GET /metrics -- Prometheus text format
+async fn handle_metrics(State(state): State<ServerState>) -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+    let agg = state.aggregator.read().await;
+
+    let cluster = agg.cluster_power(None);
+    state.metrics.cluster_power_watts.get_or_create(&ComponentLabel { component: "cpu".into() }).set(cluster.cpu_uw as f64 / 1e6);
+    state.metrics.cluster_power_watts.get_or_create(&ComponentLabel { component: "memory".into() }).set(cluster.memory_uw as f64 / 1e6);
+    state.metrics.cluster_power_watts.get_or_create(&ComponentLabel { component: "gpu".into() }).set(cluster.gpu_uw as f64 / 1e6);
+    state.metrics.cluster_power_watts.get_or_create(&ComponentLabel { component: "platform".into() }).set(cluster.platform_uw as f64 / 1e6);
+
+    state.metrics.pod_count.set(cluster.pod_count as i64);
+    state.metrics.node_count.set(cluster.node_count as i64);
+
+    for ns in agg.namespace_power(None) {
+        state.metrics.namespace_power_watts.get_or_create(&NamespaceComponentLabel { namespace: ns.namespace.clone(), component: "total".into() }).set(ns.total_uw as f64 / 1e6);
+    }
+
+    for node in agg.node_summaries(None) {
+        let label = NodeLabel { node: node.node_name.clone() };
+        state.metrics.node_power_watts.get_or_create(&label).set((node.cpu_uw + node.memory_uw + node.gpu_uw) as f64 / 1e6);
+        state.metrics.node_error_ratio.get_or_create(&label).set(node.error_ratio);
+        state.metrics.agent_last_report_secs.get_or_create(&label).set(node.last_seen_secs_ago as f64);
+    }
+
+    drop(agg);
+
+    let body = state.metrics.render();
+    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body)
+}
+
 /// GET /healthz
 async fn handle_healthz() -> &'static str {
     "ok"
@@ -523,6 +563,7 @@ mod tests {
             aggregator: Arc::new(RwLock::new(ClusterAggregator::new())),
             classification: Arc::new(std::sync::RwLock::new(crate::application::ClassificationData::default())),
             api_key: None,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 

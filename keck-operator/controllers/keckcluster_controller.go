@@ -11,17 +11,24 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keckv1alpha1 "github.com/avivgt/keck/keck-operator/api/v1alpha1"
 )
@@ -36,7 +43,8 @@ const (
 // Deployment (controller), Services.
 type KeckClusterReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=keck.io,resources=keckclusters,verbs=get;list;watch;create;update;patch;delete
@@ -45,6 +53,8 @@ type KeckClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=daemonsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces;serviceaccounts;services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -116,28 +126,49 @@ func (r *KeckClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Ensure agent DaemonSet
 	if err := r.ensureAgentDaemonSet(ctx, &keck); err != nil {
+		r.event(&keck, "Warning", "ReconcileFailed", "Failed to ensure agent DaemonSet: "+err.Error())
 		return ctrl.Result{}, fmt.Errorf("ensuring agent DaemonSet: %w", err)
 	}
 
 	// Ensure nginx TLS config for controller proxy
 	if err := r.ensureNginxConfig(ctx); err != nil {
+		r.event(&keck, "Warning", "ReconcileFailed", "Failed to ensure nginx config: "+err.Error())
 		return ctrl.Result{}, fmt.Errorf("ensuring nginx config: %w", err)
 	}
 
 	// Ensure controller Deployment
 	if err := r.ensureControllerDeployment(ctx, &keck); err != nil {
+		r.event(&keck, "Warning", "ReconcileFailed", "Failed to ensure controller Deployment: "+err.Error())
 		return ctrl.Result{}, fmt.Errorf("ensuring controller Deployment: %w", err)
 	}
 
 	// Ensure controller Service
 	if err := r.ensureControllerService(ctx, &keck); err != nil {
+		r.event(&keck, "Warning", "ReconcileFailed", "Failed to ensure controller Service: "+err.Error())
 		return ctrl.Result{}, fmt.Errorf("ensuring controller Service: %w", err)
+	}
+
+	// Ensure ServiceMonitor for Prometheus scraping (best-effort, skip if CRD not installed)
+	if err := r.ensureServiceMonitor(ctx); err != nil {
+		logger.V(1).Info("ServiceMonitor not created (monitoring CRD may not be installed)", "error", err)
+	}
+
+	// Ensure NetworkPolicy for keck-system
+	if err := r.ensureNetworkPolicy(ctx); err != nil {
+		logger.Error(err, "Failed to create NetworkPolicy")
+	}
+
+	// Ensure PodDisruptionBudget for controller
+	if err := r.ensurePDB(ctx); err != nil {
+		logger.Error(err, "Failed to create PDB")
 	}
 
 	// Update status
 	if err := r.updateStatus(ctx, &keck); err != nil {
 		logger.Error(err, "Failed to update status")
 	}
+
+	r.event(&keck, "Normal", "Reconciled", "Successfully reconciled all Keck resources")
 
 	return ctrl.Result{}, nil
 }
@@ -240,24 +271,37 @@ func (r *KeckClusterReconciler) ensureNamespace(ctx context.Context, keck *keckv
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, ns)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+	}
+	existing.Labels["app.kubernetes.io/managed-by"] = "keck-operator"
+	existing.Labels["app.kubernetes.io/part-of"] = "keck"
+	return r.Update(ctx, existing)
 }
 
 func (r *KeckClusterReconciler) ensureServiceAccount(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "keck-agent",
-			Namespace: keckNamespace,
-			Labels:    commonLabels(),
-		},
+	for _, name := range []string{"keck-agent", "keck-controller"} {
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: keckNamespace,
+				Labels:    commonLabels(),
+			},
+		}
+		existing := &corev1.ServiceAccount{}
+		err := r.Get(ctx, types.NamespacedName{Name: sa.Name, Namespace: sa.Namespace}, existing)
+		if errors.IsNotFound(err) {
+			if err := r.Create(ctx, sa); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
 	}
-
-	existing := &corev1.ServiceAccount{}
-	err := r.Get(ctx, types.NamespacedName{Name: sa.Name, Namespace: sa.Namespace}, existing)
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, sa)
-	}
-	return err
+	return nil
 }
 
 func (r *KeckClusterReconciler) ensureAPIKeySecret(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
@@ -319,6 +363,12 @@ func (r *KeckClusterReconciler) ensureRBAC(ctx context.Context, keck *keckv1alph
 		if err := r.Create(ctx, role); err != nil {
 			return err
 		}
+	} else if err == nil {
+		existing.Rules = role.Rules
+		existing.Labels = role.Labels
+		if err := r.Update(ctx, existing); err != nil {
+			return err
+		}
 	}
 
 	// ClusterRoleBinding
@@ -346,12 +396,17 @@ func (r *KeckClusterReconciler) ensureRBAC(ctx context.Context, keck *keckv1alph
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, binding)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	existingBinding.Subjects = binding.Subjects
+	existingBinding.Labels = binding.Labels
+	return r.Update(ctx, existingBinding)
 }
 
 func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
-	privileged := true
 	hostPID := true
+	readOnly := true
 
 	image := agentImage(keck)
 
@@ -380,6 +435,25 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 				},
 			},
 		},
+	}
+
+	if keck.Spec.Agent.DefaultProfile != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "KECK_PROFILE",
+			Value: keck.Spec.Agent.DefaultProfile,
+		})
+	}
+	if keck.Spec.Agent.GPUEnabled {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "KECK_GPU_ENABLED",
+			Value: "true",
+		})
+	}
+	if len(keck.Spec.Agent.CapturedLabels) > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "KECK_CAPTURED_LABELS",
+			Value: strings.Join(keck.Spec.Agent.CapturedLabels, ","),
+		})
 	}
 
 	// Add Redfish/BMC configuration if specified
@@ -457,7 +531,37 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 							Command:         []string{"/usr/bin/keck-agent"},
 							Env:             envVars,
 							SecurityContext: &corev1.SecurityContext{
-								Privileged: &privileged,
+								Capabilities: &corev1.Capabilities{
+									Add:  []corev1.Capability{"SYS_ADMIN", "PERFMON", "BPF", "SYS_RESOURCE"},
+									Drop: []corev1.Capability{"ALL"},
+								},
+								ReadOnlyRootFilesystem: &readOnly,
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path:   "/healthz",
+										Port:   intstr.FromInt32(9100),
+										Scheme: corev1.URISchemeHTTP,
+									},
+								},
+								InitialDelaySeconds: 30,
+								PeriodSeconds:       30,
+								TimeoutSeconds:      3,
+								FailureThreshold:    3,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path:   "/healthz",
+										Port:   intstr.FromInt32(9100),
+										Scheme: corev1.URISchemeHTTP,
+									},
+								},
+								InitialDelaySeconds: 10,
+								PeriodSeconds:       10,
+								TimeoutSeconds:      3,
+								FailureThreshold:    3,
 							},
 							Resources: agentResources(keck),
 							VolumeMounts: []corev1.VolumeMount{
@@ -504,6 +608,7 @@ func (r *KeckClusterReconciler) ensureAgentDaemonSet(ctx context.Context, keck *
 }
 
 func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
+	readOnly := true
 	image := controllerImage(keck)
 	replicas := keck.Spec.Controller.Replicas
 	if replicas == 0 {
@@ -543,7 +648,7 @@ func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, 
 					Labels: controllerLabels(),
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "keck-agent",
+					ServiceAccountName: "keck-controller",
 					Containers: []corev1.Container{
 						{
 							Name:            "keck-controller",
@@ -572,14 +677,54 @@ func (r *KeckClusterReconciler) ensureControllerDeployment(ctx context.Context, 
 									Value: "true",
 								},
 							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path:   "/healthz",
+										Port:   intstr.FromInt32(8080),
+										Scheme: corev1.URISchemeHTTP,
+									},
+								},
+								InitialDelaySeconds: 15,
+								PeriodSeconds:       15,
+								TimeoutSeconds:      3,
+								FailureThreshold:    3,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path:   "/healthz",
+										Port:   intstr.FromInt32(8080),
+										Scheme: corev1.URISchemeHTTP,
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
+								TimeoutSeconds:      3,
+								FailureThreshold:    3,
+							},
+							SecurityContext: &corev1.SecurityContext{
+								ReadOnlyRootFilesystem: &readOnly,
+								RunAsNonRoot:           &readOnly,
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+							},
 							Resources: controllerResources(keck),
 						},
 						{
 							Name:    "tls-proxy",
-							Image:   "nginxinc/nginx-unprivileged:alpine",
+							Image:   "nginxinc/nginx-unprivileged:1.27-alpine",
 							Command: []string{"nginx", "-g", "daemon off;"},
 							Ports: []corev1.ContainerPort{
 								{Name: "https", ContainerPort: 9443, Protocol: corev1.ProtocolTCP},
+							},
+							SecurityContext: &corev1.SecurityContext{
+								ReadOnlyRootFilesystem: &readOnly,
+								RunAsNonRoot:           &readOnly,
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "tls", MountPath: "/etc/tls", ReadOnly: true},
@@ -698,6 +843,166 @@ func (r *KeckClusterReconciler) ensureControllerService(ctx context.Context, kec
 	return r.Update(ctx, existing)
 }
 
+func (r *KeckClusterReconciler) ensurePDB(ctx context.Context) error {
+	minAvailable := intstr.FromInt32(1)
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "keck-controller",
+			Namespace: keckNamespace,
+			Labels:    commonLabels(),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &minAvailable,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/name":      "keck-controller",
+					"app.kubernetes.io/component": "controller",
+				},
+			},
+		},
+	}
+
+	existing := &policyv1.PodDisruptionBudget{}
+	err := r.Get(ctx, types.NamespacedName{Name: pdb.Name, Namespace: pdb.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, pdb)
+	}
+	if err != nil {
+		return err
+	}
+	existing.Spec = pdb.Spec
+	return r.Update(ctx, existing)
+}
+
+func (r *KeckClusterReconciler) ensureNetworkPolicy(ctx context.Context) error {
+	tcpProtocol := corev1.ProtocolTCP
+
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "keck-controller-ingress",
+			Namespace: keckNamespace,
+			Labels:    commonLabels(),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/name":      "keck-controller",
+					"app.kubernetes.io/component": "controller",
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					// Agent -> controller (report ingestion)
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app.kubernetes.io/name": "keck-agent",
+								},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Port: &intstr.IntOrString{Type: intstr.Int, IntVal: 8080}, Protocol: &tcpProtocol},
+					},
+				},
+				{
+					// Prometheus -> controller (metrics scraping)
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Port: &intstr.IntOrString{Type: intstr.Int, IntVal: 8080}, Protocol: &tcpProtocol},
+					},
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": "openshift-monitoring",
+								},
+							},
+						},
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": "openshift-user-workload-monitoring",
+								},
+							},
+						},
+					},
+				},
+				{
+					// Console plugin -> TLS proxy
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Port: &intstr.IntOrString{Type: intstr.Int, IntVal: 9443}, Protocol: &tcpProtocol},
+					},
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": "openshift-console",
+								},
+							},
+						},
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app.kubernetes.io/name": "keck-power-management",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	existing := &networkingv1.NetworkPolicy{}
+	err := r.Get(ctx, types.NamespacedName{Name: np.Name, Namespace: np.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, np)
+	}
+	if err != nil {
+		return err
+	}
+	existing.Spec = np.Spec
+	return r.Update(ctx, existing)
+}
+
+func (r *KeckClusterReconciler) ensureServiceMonitor(ctx context.Context) error {
+	sm := &unstructured.Unstructured{}
+	sm.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "monitoring.coreos.com",
+		Version: "v1",
+		Kind:    "ServiceMonitor",
+	})
+	sm.SetName("keck-controller")
+	sm.SetNamespace(keckNamespace)
+	sm.SetLabels(commonLabels())
+
+	sm.Object["spec"] = map[string]interface{}{
+		"selector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{
+				"app.kubernetes.io/name":      "keck-controller",
+				"app.kubernetes.io/component": "controller",
+			},
+		},
+		"endpoints": []interface{}{
+			map[string]interface{}{
+				"port":     "http",
+				"path":     "/metrics",
+				"interval": "30s",
+			},
+		},
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(sm.GroupVersionKind())
+	err := r.Get(ctx, types.NamespacedName{Name: sm.GetName(), Namespace: sm.GetNamespace()}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, sm)
+	}
+	return err
+}
+
 func (r *KeckClusterReconciler) updateStatus(ctx context.Context, keck *keckv1alpha1.KeckCluster) error {
 	// Check DaemonSet status
 	ds := &appsv1.DaemonSet{}
@@ -729,11 +1034,40 @@ func (r *KeckClusterReconciler) updateStatus(ctx context.Context, keck *keckv1al
 }
 
 func (r *KeckClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	mapToKeckCluster := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			if obj.GetNamespace() != keckNamespace {
+				return nil
+			}
+			labels := obj.GetLabels()
+			if labels["app.kubernetes.io/managed-by"] != "keck-operator" {
+				return nil
+			}
+			var clusters keckv1alpha1.KeckClusterList
+			if err := r.List(ctx, &clusters); err != nil {
+				return nil
+			}
+			reqs := make([]reconcile.Request, len(clusters.Items))
+			for i, c := range clusters.Items {
+				reqs[i] = reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: c.Name},
+				}
+			}
+			return reqs
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keckv1alpha1.KeckCluster{}).
-		Owns(&appsv1.DaemonSet{}).
-		Owns(&appsv1.Deployment{}).
+		Watches(&appsv1.DaemonSet{}, mapToKeckCluster).
+		Watches(&appsv1.Deployment{}, mapToKeckCluster).
 		Complete(r)
+}
+
+func (r *KeckClusterReconciler) event(obj runtime.Object, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, eventType, reason, message)
+	}
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────

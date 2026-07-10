@@ -10,6 +10,7 @@ mod api;
 mod application;
 mod carbon;
 mod kepler_scraper;
+pub mod metrics;
 mod scheduler;
 
 use std::sync::Arc;
@@ -32,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let aggregator = Arc::new(RwLock::new(ClusterAggregator::new()));
     let classification: SharedClassification = Arc::new(std::sync::RwLock::new(ClassificationData::default()));
+    let metrics = Arc::new(metrics::Metrics::new());
 
     let classification_clone = classification.clone();
     tokio::spawn(async move {
@@ -48,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         watch_cluster_nodes(node_watcher_agg).await;
     });
 
-    api::start_rest_server(aggregator, classification, "0.0.0.0:8080").await?;
+    api::start_rest_server(aggregator, classification, metrics, "0.0.0.0:8080").await?;
 
     Ok(())
 }

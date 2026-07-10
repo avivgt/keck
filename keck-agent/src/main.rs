@@ -18,6 +18,8 @@ mod perf_counters;
 
 use std::collections::HashMap;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use log::{info, warn};
@@ -128,6 +130,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(10),
     );
 
+    let healthy = Arc::new(AtomicBool::new(false));
+
+    // Spawn /healthz server on port 9100 for liveness/readiness probes
+    {
+        let healthy = healthy.clone();
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind("0.0.0.0:9100").await {
+                Ok(l) => l,
+                Err(e) => {
+                    log::warn!("Failed to bind healthz listener on :9100: {}", e);
+                    return;
+                }
+            };
+            log::info!("Health check listening on :9100/healthz");
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let is_healthy = healthy.load(Ordering::Relaxed);
+                    let (status, body) = if is_healthy {
+                        ("200 OK", "ok")
+                    } else {
+                        ("503 Service Unavailable", "not ready")
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status, body.len(), body
+                    );
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+                }
+            }
+        });
+    }
+
     info!("Keck agent starting");
     info!("  Node: {}", node_name);
     info!("  Controller: {}", controller_url);
@@ -184,9 +218,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Build K8s API client using in-cluster service account
-    let k8s_client = Client::try_default().await
-        .expect("Failed to create K8s client (not in-cluster?)");
+    // Build K8s API client using in-cluster service account (retry with backoff)
+    let k8s_client = {
+        let mut attempts = 0u32;
+        loop {
+            match Client::try_default().await {
+                Ok(c) => break c,
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= 10 {
+                        return Err(format!("Failed to create K8s client after {} attempts: {}", attempts, e).into());
+                    }
+                    let delay = Duration::from_secs(2u64.pow(attempts.min(5)));
+                    warn!("K8s client not ready (attempt {}/10): {}, retrying in {:?}", attempts, e, delay);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    };
 
     let (exact_labels, prefix_labels) = {
         let raw = std::env::var("KECK_CAPTURED_LABELS").unwrap_or_default();
@@ -562,6 +611,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
+                healthy.store(true, Ordering::Relaxed);
                 info!(
                     "Reported: cpu={:.1}W({}) mem={:.1}W platform={} pods={}",
                     cpu_uw as f64 / 1e6,

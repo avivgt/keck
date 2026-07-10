@@ -4,6 +4,8 @@
 # Prerequisites:
 #   - podman or docker logged in to quay.io
 #   - opm CLI installed (for catalog build)
+#   - trivy CLI installed (for CVE scanning)
+#   - cosign CLI installed (optional, for image signing)
 #
 # Usage:
 #   ./scripts/release.sh [VERSION]
@@ -23,6 +25,24 @@ CATALOG_LATEST="${REGISTRY}/keck-catalog:latest"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+SKIP_SCAN="${SKIP_SCAN:-false}"
+
+scan_and_sign() {
+  local img="$1"
+  if [ "$SKIP_SCAN" != "true" ] && command -v trivy &>/dev/null; then
+    echo "  Scanning ${img} for critical CVEs..."
+    if ! trivy image --exit-code 1 --severity CRITICAL --quiet "${img}"; then
+      echo "  ERROR: Critical CVEs found in ${img}. Fix before releasing."
+      exit 1
+    fi
+    echo "  Scan passed."
+  fi
+  if command -v cosign &>/dev/null; then
+    echo "  Signing ${img}..."
+    cosign sign --yes "${img}" 2>/dev/null || echo "  Warning: cosign signing failed (key may not be configured)"
+  fi
+}
+
 echo "=== Keck Release v${VERSION} ==="
 echo "  Registry: ${REGISTRY}"
 echo "  Tool: ${CONTAINER_TOOL}"
@@ -33,6 +53,7 @@ echo "--- 1/4: Operator image ---"
 cd "$ROOT_DIR/keck-operator"
 ${CONTAINER_TOOL} build -t "${OPERATOR_IMG}" .
 ${CONTAINER_TOOL} push "${OPERATOR_IMG}"
+scan_and_sign "${OPERATOR_IMG}"
 echo "  Pushed: ${OPERATOR_IMG}"
 
 # Step 2: Build and push bundle image
@@ -48,6 +69,7 @@ sed -i "s|quay.io/aguetta/keck-operator:0.1.0|${OPERATOR_IMG}|g" \
 cd "$TMPDIR"
 ${CONTAINER_TOOL} build -t "${BUNDLE_IMG}" .
 ${CONTAINER_TOOL} push "${BUNDLE_IMG}"
+scan_and_sign "${BUNDLE_IMG}"
 rm -rf "$TMPDIR"
 echo "  Pushed: ${BUNDLE_IMG}"
 
@@ -99,6 +121,7 @@ ${CONTAINER_TOOL} build -t "${CATALOG_IMG}" .
 ${CONTAINER_TOOL} tag "${CATALOG_IMG}" "${CATALOG_LATEST}"
 ${CONTAINER_TOOL} push "${CATALOG_IMG}"
 ${CONTAINER_TOOL} push "${CATALOG_LATEST}"
+scan_and_sign "${CATALOG_IMG}"
 rm -rf "$TMPDIR"
 echo "  Pushed: ${CATALOG_IMG}"
 echo "  Pushed: ${CATALOG_LATEST}"

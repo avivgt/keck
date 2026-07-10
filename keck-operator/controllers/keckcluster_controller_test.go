@@ -92,7 +92,7 @@ func TestHelperFunctions(t *testing.T) {
 		keck := newKeckCluster("test")
 		keck.Spec.Image.Repository = ""
 		repo := imageRepo(keck)
-		if repo != "quay.io/aguetta/keck" {
+		if repo != "quay.io/aguetta" {
 			t.Errorf("expected default repo, got %s", repo)
 		}
 	})
@@ -356,13 +356,18 @@ func TestReconcileCreatesAgentDaemonSet(t *testing.T) {
 	if container.Name != "keck-agent" {
 		t.Errorf("expected container name keck-agent, got %s", container.Name)
 	}
-	if *container.SecurityContext.Privileged != true {
-		t.Error("agent container should be privileged")
+	if container.SecurityContext.Capabilities == nil {
+		t.Fatal("agent container should have explicit capabilities")
+	}
+	caps := container.SecurityContext.Capabilities.Add
+	expectedCaps := []corev1.Capability{"SYS_ADMIN", "PERFMON", "BPF", "SYS_RESOURCE"}
+	if len(caps) != len(expectedCaps) {
+		t.Errorf("expected %d capabilities, got %d", len(expectedCaps), len(caps))
 	}
 
-	// Check volume mounts for /proc and /sys
-	if len(container.VolumeMounts) != 2 {
-		t.Errorf("expected 2 volume mounts, got %d", len(container.VolumeMounts))
+	// Check volume mounts for /proc, /sys, and tracefs
+	if len(container.VolumeMounts) != 3 {
+		t.Errorf("expected 3 volume mounts, got %d", len(container.VolumeMounts))
 	}
 }
 
@@ -421,8 +426,8 @@ func TestReconcileCreatesControllerService(t *testing.T) {
 		t.Fatalf("Service not created: %v", err)
 	}
 
-	if len(svc.Spec.Ports) != 2 {
-		t.Errorf("expected 2 service ports (grpc, http), got %d", len(svc.Spec.Ports))
+	if len(svc.Spec.Ports) != 3 {
+		t.Errorf("expected 3 service ports (http, grpc, https), got %d", len(svc.Spec.Ports))
 	}
 }
 

@@ -4,6 +4,7 @@ metadata:
   name: keck-operator.v0.1.0
   namespace: placeholder
   annotations:
+    olm.skipRange: ">=0.0.1 <0.1.0"
     alm-examples: |-
       [
         {
