@@ -5,7 +5,7 @@
 
 import * as React from "react";
 import {
-  Page,
+
   PageSection,
   Title,
   Card,
@@ -32,17 +32,17 @@ const PowerManagementPage: React.FC = () => {
 
   if (loading) {
     return (
-      <Page>
+      <>
         <PageSection>
           <Spinner aria-label="Loading power data" />
         </PageSection>
-      </Page>
+      </>
     );
   }
 
   if (error || !data) {
     return (
-      <Page>
+      <>
         <PageSection>
           <EmptyState titleText="Power Consumption">
             <EmptyStateBody>
@@ -50,12 +50,12 @@ const PowerManagementPage: React.FC = () => {
             </EmptyStateBody>
           </EmptyState>
         </PageSection>
-      </Page>
+      </>
     );
   }
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} alignItems={{ default: "alignItemsCenter" }}>
           <FlexItem>
@@ -343,7 +343,7 @@ const PowerManagementPage: React.FC = () => {
           </Card>
         </PageSection>
       )}
-    </Page>
+    </>
   );
 };
 

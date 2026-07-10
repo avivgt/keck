@@ -5,7 +5,7 @@
 import * as React from "react";
 import { Link } from "react-router";
 import {
-  Page,
+
   PageSection,
   Title,
   Breadcrumb,
@@ -92,36 +92,36 @@ const NamespaceView: React.FC = () => {
 
   if (!ns) {
     return (
-      <Page>
+      <>
         <PageSection>
           <EmptyState titleText="No Namespace">
             <EmptyStateBody>No namespace specified in URL.</EmptyStateBody>
           </EmptyState>
         </PageSection>
-      </Page>
+      </>
     );
   }
 
   if (loading) {
-    return <Page><PageSection><Spinner aria-label="Loading pods" /></PageSection></Page>;
+    return <><PageSection><Spinner aria-label="Loading pods" /></PageSection></>;
   }
 
   if (error) {
     return (
-      <Page>
+      <>
         <PageSection>
           <EmptyState titleText="Error loading pods">
             <EmptyStateBody>{error}</EmptyStateBody>
           </EmptyState>
         </PageSection>
-      </Page>
+      </>
     );
   }
 
   const totalWatts = pods.reduce((sum, p) => sum + p.total_watts, 0);
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Breadcrumb>
           <BreadcrumbItem>
@@ -354,7 +354,7 @@ const NamespaceView: React.FC = () => {
           </EmptyState>
         )}
       </PageSection>
-    </Page>
+    </>
   );
 };
 
