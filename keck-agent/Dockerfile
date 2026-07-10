@@ -35,4 +35,7 @@ LABEL name="keck-agent" \
 
 COPY --from=builder /build/target/release/keck-agent /usr/bin/keck-agent
 
+# Agent requires root for eBPF tracepoint attachment and /proc/sys access
+USER 0
+
 ENTRYPOINT ["/usr/bin/keck-agent"]

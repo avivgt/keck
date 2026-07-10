@@ -413,10 +413,15 @@ oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'
 
 ## Step 6: Configure Power Budgets (Optional)
 
+> **Note:** PowerBudget enforcement is not yet implemented. The CRD can be
+> created to define budget intent, but the status columns (CURRENT, USAGE,
+> EXCEEDED) will show zero values. The reconciler does not yet query the
+> controller for actual power usage. This will be implemented in a future release.
+
 ### Per-Namespace Budget
 
-From the console: **Operators → Installed Operators → Keck Operator
-→ PowerBudget → Create PowerBudget**
+From the console: **Operators > Installed Operators > Keck Operator
+> PowerBudget > Create PowerBudget**
 
 Or from CLI:
 
@@ -424,24 +429,29 @@ Or from CLI:
 oc apply -f keck-operator/config/samples/powerbudget.yaml
 
 oc get powerbudgets -A
-# NAMESPACE      NAME                 BUDGET (W)   CURRENT (W)   USAGE   EXCEEDED
-# ml-training    ml-training-budget   10000        7234          72%     false
 ```
 
 ### Per-Node Profiles
+
+> **Note:** PowerProfile per-node overrides are not yet enforced. The CRD can
+> be created to declare intent, but no controller reconciles it. The NODES
+> column will show 0. This will be implemented in a future release.
 
 ```bash
 oc apply -f keck-operator/config/samples/powerprofile.yaml
 
 oc get powerprofiles
-# NAME              PROFILE   NODES   AGE
-# gpu-nodes-full    full      4       1m
-# edge-minimal      minimal   2       1m
 ```
 
-## Step 7: Prometheus Integration (Optional)
+## Step 7: Prometheus Integration (Not Yet Available)
 
-If you have the OpenShift monitoring stack (Prometheus/Thanos):
+> **Note:** The agent Prometheus /metrics endpoint is not yet implemented.
+> Port 9100 is declared on the agent pods but currently serves no metrics.
+> A ServiceMonitor created now will scrape empty responses. Prometheus
+> metrics export is on the roadmap -- see the README for details.
+
+<!--
+When implemented, create a ServiceMonitor:
 
 ```bash
 cat <<'EOF' | oc apply -f -
@@ -459,6 +469,7 @@ spec:
       interval: 15s
 EOF
 ```
+-->
 
 ## Rebuilding After Code Changes
 

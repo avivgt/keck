@@ -40,7 +40,7 @@ func (r *PowerBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		"action", budget.Spec.Action,
 	)
 
-	// TODO: Query keck-controller API for current namespace power usage
+	// NOT YET IMPLEMENTED: Query keck-controller API for current namespace power usage
 	// and update the PowerBudget status.
 	//
 	// GET http://keck-controller.keck-system:8080/api/v1/namespaces/{ns}
@@ -60,7 +60,7 @@ func (r *PowerBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			"max", budget.Spec.MaxWatts,
 		)
 
-		// TODO: Execute action (alert webhook, etc.)
+		// NOT YET IMPLEMENTED: Execute action (alert webhook, etc.)
 	} else {
 		budget.Status.Exceeded = false
 		if budget.Spec.MaxWatts > 0 {

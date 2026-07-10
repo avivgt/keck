@@ -24,7 +24,7 @@ pub enum ObserverError {
 
 /// Observation snapshot for the attribution engine (forward-looking type).
 /// Maps eBPF data into the format expected by AttributionEngine.
-/// TODO: wire AttributionEngine into main loop and populate this from EbpfSnapshot.
+/// NOT YET IMPLEMENTED: wire AttributionEngine into main loop and populate this from EbpfSnapshot.
 pub struct ObservationSnapshot {
     pub pid_cpu_times: Vec<(keck_common::PidCpuKey, u64)>,
     pub cpu_freq_times: Vec<(keck_common::CpuFreqKey, u64)>,
@@ -495,15 +495,14 @@ fn attach_perf_to_bpf_maps(bpf: &mut Ebpf) -> Result<Vec<RawFd>, String> {
         unsafe { libc::close(map_fd); } // close the extra FD from bpf_obj_get
     }
 
-    // Enable PMC reading in the eBPF program by setting PMC_ENABLED[0] = 1
+    // Enable PMC reading in the eBPF program by setting PMC_ENABLED[0] = 1.
+    // PMC_ENABLED is a regular Array (shared across CPUs), so one write is sufficient.
     if let Some(map_data) = bpf.map_mut("PMC_ENABLED") {
         if let Some(map_fd) = get_map_fd(map_data) {
             let key: u32 = 0;
-            // PerCpuArray needs per-CPU values, but we just set a single u32.
-            // The eBPF program reads index 0 which returns this CPU's value.
             let value: u32 = 1;
             let _ = bpf_map_update_raw(map_fd, &key as *const _ as u64, &value as *const _ as u64);
-            unsafe { libc::close(map_fd); } // close the extra FD from bpf_obj_get
+            unsafe { libc::close(map_fd); }
         }
     }
 

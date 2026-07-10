@@ -80,9 +80,13 @@ func (in *AgentSpec) DeepCopyInto(out *AgentSpec) {
 		copy(out.Tolerations, in.Tolerations)
 	}
 	in.Resources.DeepCopyInto(&out.Resources)
+	if in.CapturedLabels != nil {
+		out.CapturedLabels = make([]string, len(in.CapturedLabels))
+		copy(out.CapturedLabels, in.CapturedLabels)
+	}
 	if in.Redfish != nil {
 		out.Redfish = new(RedfishSpec)
-		*out.Redfish = *in.Redfish
+		in.Redfish.DeepCopyInto(out.Redfish)
 	}
 }
 

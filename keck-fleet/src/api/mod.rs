@@ -33,7 +33,7 @@ pub async fn start_grpc_server(
     registry: Arc<RwLock<ClusterRegistry>>,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Implement tonic gRPC server
+    // NOT YET IMPLEMENTED: tonic gRPC server for cluster report ingestion
     //
     // service FleetService {
     //   rpc ReportCluster(stream ClusterReport) returns (Ack);
@@ -58,7 +58,7 @@ pub async fn start_rest_server(
     registry: Arc<RwLock<ClusterRegistry>>,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Implement with axum
+    // NOT YET IMPLEMENTED: axum REST API for fleet dashboard
     //
     // GET /api/v1/fleet → {
     //   "total_watts": 45000.0,

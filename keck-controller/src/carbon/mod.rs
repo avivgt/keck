@@ -168,7 +168,7 @@ impl CarbonTracker {
             }
         };
 
-        // TODO: Implement actual API calls
+        // NOT YET IMPLEMENTED: actual API calls to Electricity Maps / WattTime
         //
         // Electricity Maps:
         //   GET https://api.electricitymap.org/v3/carbon-intensity/latest

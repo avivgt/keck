@@ -11,7 +11,7 @@
 use aya_ebpf::{
     helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_smp_processor_id, bpf_ktime_get_ns},
     macros::{kprobe, kretprobe, map, tracepoint},
-    maps::{HashMap, PerfEventArray, PerCpuArray},
+    maps::{Array, HashMap, PerfEventArray, PerCpuArray},
     programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
 use keck_common::{
@@ -64,8 +64,9 @@ static PERF_CACHE_MISSES: PerfEventArray<u64> = PerfEventArray::new(0);
 
 // Flag: set to 1 by userspace when perf FDs are attached.
 // When 0, sched_switch skips PMC reads (graceful degradation).
+// Array (not PerCpuArray) so a single userspace write is visible to all CPUs.
 #[map]
-static PMC_ENABLED: PerCpuArray<u32> = PerCpuArray::with_max_entries(1, 0);
+static PMC_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
 
 // ─── sched_switch ────────────────────────────────────────────────
 

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  go-operator:
+    name: Go Operator (lint + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: keck-operator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: keck-operator/go.mod
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: keck-operator
+      - name: Test
+        run: go test ./... -v -count=1
+
+  rust-controller:
+    name: Rust Controller (test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test controller
+        run: cargo test -p keck-controller
+
+  rust-agent:
+    name: Rust Agent (check + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+      - name: Check agent
+        run: cargo check -p keck-agent
+      - name: Test agent (unit tests only)
+        run: cargo test -p keck-agent
