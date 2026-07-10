@@ -40,7 +40,8 @@
       "NamespaceView": "./src/components/namespace/NamespaceView",
       "NodesView": "./src/components/node/NodesView",
       "PodView": "./src/components/pod/PodView",
-      "ApplicationsView": "./src/components/application/ApplicationsView"
+      "ApplicationsView": "./src/components/application/ApplicationsView",
+      "KeplerComparisonView": "./src/components/kepler/KeplerComparisonView"
     },
     "dependencies": {
       "@console/pluginAPI": "*"

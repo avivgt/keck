@@ -50,19 +50,9 @@
   {
     "type": "console.navigation/href",
     "properties": {
-      "id": "power-budgets",
-      "name": "Power Budgets",
-      "href": "/power-consumption/budgets",
-      "section": "power-consumption",
-      "perspective": "admin"
-    }
-  },
-  {
-    "type": "console.navigation/href",
-    "properties": {
-      "id": "power-carbon",
-      "name": "Carbon & Cost",
-      "href": "/power-consumption/carbon",
+      "id": "kepler-comparison",
+      "name": "Kepler Comparison",
+      "href": "/power-consumption/kepler",
       "section": "power-consumption",
       "perspective": "admin"
     }
@@ -104,6 +94,16 @@
       "path": "/power-consumption/applications",
       "component": {
         "$codeRef": "ApplicationsView"
+      }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/power-consumption/kepler",
+      "component": {
+        "$codeRef": "KeplerComparisonView"
       }
     }
   },
