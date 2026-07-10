@@ -6,7 +6,7 @@
 import * as React from "react";
 import { useParams, Link } from "react-router";
 import {
-  Page,
+
   PageSection,
   Title,
   Breadcrumb,
@@ -35,11 +35,11 @@ const PodView: React.FC = () => {
   }, [uid]);
 
   if (loading) {
-    return <Page><PageSection><Spinner /></PageSection></Page>;
+    return <><PageSection><Spinner /></PageSection></>;
   }
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Breadcrumb>
           <BreadcrumbItem>
@@ -67,7 +67,7 @@ const PodView: React.FC = () => {
           </EmptyStateBody>
         </EmptyState>
       </PageSection>
-    </Page>
+    </>
   );
 };
 

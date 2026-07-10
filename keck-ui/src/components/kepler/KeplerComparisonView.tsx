@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import {
-  Page,
+
   PageSection,
   Title,
   Card,
@@ -50,9 +50,9 @@ const KeplerComparisonView: React.FC = () => {
 
   if (loading) {
     return (
-      <Page>
+      <>
         <PageSection><Spinner aria-label="Loading comparison data" /></PageSection>
-      </Page>
+      </>
     );
   }
 
@@ -61,13 +61,13 @@ const KeplerComparisonView: React.FC = () => {
 
   if (!kc) {
     return (
-      <Page>
+      <>
         <PageSection>
           <EmptyState titleText="Kepler Comparison">
             <EmptyStateBody>No Keck data available. Ensure the Keck agent and controller are running.</EmptyStateBody>
           </EmptyState>
         </PageSection>
-      </Page>
+      </>
     );
   }
 
@@ -97,7 +97,7 @@ const KeplerComparisonView: React.FC = () => {
     .map(([name, d]) => ({ name, keck: d.keck, kepler: d.kepler }));
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Title headingLevel="h1" size="2xl">
           <BoltIcon /> Kepler Comparison
@@ -272,7 +272,7 @@ const KeplerComparisonView: React.FC = () => {
           </CardBody>
         </Card>
       </PageSection>
-    </Page>
+    </>
   );
 };
 

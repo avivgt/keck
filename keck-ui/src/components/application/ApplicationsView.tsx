@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import {
-  Page,
+
   PageSection,
   Title,
   Spinner,
@@ -57,7 +57,7 @@ const ApplicationsView: React.FC = () => {
   const groups = groupsData || [];
 
   if (loading) {
-    return <Page><PageSection><Spinner /></PageSection></Page>;
+    return <><PageSection><Spinner /></PageSection></>;
   }
 
   const totalWatts = groups.reduce((sum, g) => sum + g.total_watts, 0);
@@ -98,7 +98,7 @@ const ApplicationsView: React.FC = () => {
   };
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Title headingLevel="h1" size="xl">Applications</Title>
         <p style={{ marginTop: 4, color: "var(--pf-v6-global--Color--200)" }}>
@@ -174,7 +174,7 @@ const ApplicationsView: React.FC = () => {
           </EmptyState>
         )}
       </PageSection>
-    </Page>
+    </>
   );
 };
 

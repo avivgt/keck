@@ -6,7 +6,7 @@
 import * as React from "react";
 import { useNavigate } from "react-router";
 import {
-  Page,
+
   PageSection,
   Title,
   Card,
@@ -39,14 +39,14 @@ const ClusterOverview: React.FC = () => {
   const navigate = useNavigate();
 
   if (loading) {
-    return <Page><PageSection><Spinner /></PageSection></Page>;
+    return <><PageSection><Spinner /></PageSection></>;
   }
 
   const nsList = namespaces || [];
   const totalWatts = nsList.reduce((sum, ns) => sum + ns.total_watts, 0);
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Title headingLevel="h1" size="xl">
           Power by Namespace
@@ -286,7 +286,7 @@ const ClusterOverview: React.FC = () => {
         )}
       </PageSection>
 
-    </Page>
+    </>
   );
 };
 

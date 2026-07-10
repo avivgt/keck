@@ -4,7 +4,7 @@
 
 import * as React from "react";
 import {
-  Page,
+
   PageSection,
   Title,
   Spinner,
@@ -34,13 +34,13 @@ const NodesView: React.FC = () => {
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
 
   if (loading) {
-    return <Page><PageSection><Spinner /></PageSection></Page>;
+    return <><PageSection><Spinner /></PageSection></>;
   }
 
   const totalPlatform = nodes.reduce((sum, n) => sum + (n.platform_watts || 0), 0);
 
   return (
-    <Page>
+    <>
       <PageSection>
         <Title headingLevel="h1" size="xl">Nodes</Title>
         <p style={{ marginTop: 4, color: "var(--pf-v6-global--Color--200)" }}>
@@ -123,7 +123,7 @@ const NodesView: React.FC = () => {
           </EmptyState>
         )}
       </PageSection>
-    </Page>
+    </>
   );
 };
 
