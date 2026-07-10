@@ -28,8 +28,7 @@ import { formatWatts, formatErrorRatio, errorStatus } from "../utils/format";
 import { usePolling } from "../utils/usePolling";
 
 const PowerManagementPage: React.FC = () => {
-  const [method, setMethod] = React.useState<string>("keck");
-  const { data, loading, error } = usePolling(() => api.getClusterPower(method), [method]);
+  const { data, loading, error } = usePolling(() => api.getClusterPower(), []);
 
   if (loading) {
     return (
@@ -66,34 +65,6 @@ const PowerManagementPage: React.FC = () => {
             <p style={{ marginTop: 8, color: "var(--pf-v6-global--Color--200)" }}>
               Real-time power consumption across the cluster. Data refreshes every 5 seconds.
             </p>
-          </FlexItem>
-          <FlexItem>
-            <div style={{ display: "flex", gap: 0, border: "1px solid var(--pf-v6-global--BorderColor--100, #444)", borderRadius: 4, overflow: "hidden" }}>
-              {[
-                { value: "keck", label: "Keck" },
-                { value: "kepler", label: "Kepler" },
-              ].map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => setMethod(opt.value)}
-                  style={{
-                    padding: "6px 16px",
-                    border: "none",
-                    cursor: "pointer",
-                    fontSize: "0.9em",
-                    fontWeight: method === opt.value ? 700 : 400,
-                    background: method === opt.value
-                      ? "var(--pf-v6-global--primary-color--100, #0066cc)"
-                      : "var(--pf-v6-global--BackgroundColor--200, #1a1a1a)",
-                    color: method === opt.value
-                      ? "#fff"
-                      : "var(--pf-v6-global--Color--200, #a1a1aa)",
-                  }}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
           </FlexItem>
         </Flex>
       </PageSection>
